@@ -1,11 +1,12 @@
 [![Build Status](https://travis-ci.org/quantranuk/protobuf-nio.svg?branch=master)](https://travis-ci.org/quantranuk/protobuf-nio)
 # protobuf-nio
-Simple library to send and receive [protobuf messages](https://developers.google.com/protocol-buffers/) using Java NIO
+Simple library to send and receive [protobuf messages](https://developers.google.com/protocol-buffers/) using Java NIO sockets
 
 ##### Pros
-- Pure Java NIO (no netty / mina dependencies)
-- Protobuf-friendly API
-- Good throughput and scalable
+- Pure Java NIO sockets (no netty / mina dependencies)
+- Protobuf-friendly API's
+- Good throughput
+- Can handle many connections
 
 ##### Cons
 - No support for SSL/TLS yet
