@@ -1,3 +1,4 @@
+[![Build Status](https://travis-ci.org/quantranuk/protobuf-nio.svg?branch=master)](https://travis-ci.org/quantranuk/protobuf-nio)
 # protobuf-nio
 Simple library to send and receive [protobuf messages](https://developers.google.com/protocol-buffers/) using Java NIO
 
