@@ -27,9 +27,11 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
     private final int writeBufferCapacity;
     private final List<Message> messagesBeingWritten;
     private final AtomicBoolean isWritingInProgress;
+    private final int maxMessageWriteQueueSize;
 
-    SocketChannelWriter(AsynchronousSocketChannel socketChannel, long writeTimeoutMillis, int writeBufferCapacity, ExecutorService writeExecutor, CompletionHandler<Long, Message> messageWriteCompletionHandler) {
+    SocketChannelWriter(AsynchronousSocketChannel socketChannel, long writeTimeoutMillis, int writeBufferCapacity, int maxMessageWriteQueueSize, ExecutorService writeExecutor, CompletionHandler<Long, Message> messageWriteCompletionHandler) {
         this.socketChannel = socketChannel;
+        this.maxMessageWriteQueueSize = maxMessageWriteQueueSize;
         this.messageWriteCompletionHandler = messageWriteCompletionHandler;
         this.writeExecutor = writeExecutor;
         this.outboundMessageQueue = new ArrayDeque<>();
@@ -42,6 +44,10 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
     }
 
     void addToWriteQueue(Message message) {
+        if (outboundMessageQueue.size() > maxMessageWriteQueueSize) {
+            throw new IllegalStateException("Unable to accept more message due to outbound message queue is too large (" + outboundMessageQueue.size() + ")");
+        }
+
         writeExecutor.execute(() -> {
             outboundMessageQueue.add(message);
             if (!isWritingInProgress.getAndSet(true)) {

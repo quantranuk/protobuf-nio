@@ -8,6 +8,7 @@ import com.quantran.protobuf.nio.handlers.DisconnectionHandler;
 import com.quantran.protobuf.nio.handlers.MessageReceivedHandler;
 import com.quantran.protobuf.nio.handlers.MessageSendFailureHandler;
 import com.quantran.protobuf.nio.handlers.MessageSentHandler;
+import com.quantran.protobuf.nio.utils.DefaultSetting;
 import com.quantran.protobuf.nio.utils.NamedThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,6 +18,7 @@ import javax.annotation.PreDestroy;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.nio.channels.AsynchronousChannelGroup;
 import java.nio.channels.AsynchronousServerSocketChannel;
 import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.CompletionHandler;
@@ -30,9 +32,6 @@ import java.util.concurrent.Executors;
 public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AsyncProtoServerSocketChannel.class);
-    private static final int DEFAULT_BUFFER_CAPACITY = 8192;
-    private static final int DEFAULT_READ_TIMEOUT_MILLIS = 0;
-    private static final int DEFAULT_WRITE_TIMEOUT_MILLIS = 10000;
 
     private final SocketAddress serverSocketAddress;
     private final int serverPort;
@@ -43,11 +42,13 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
     private final List<MessageSendFailureHandler> messageSendFailureHandlers = new CopyOnWriteArrayList<>();
     private final Map<SocketAddress, ProtoSocketChannel> socketChannels = new ConcurrentHashMap<>();
 
-    private int readBufferSize = DEFAULT_BUFFER_CAPACITY;
-    private int writeBufferSize = DEFAULT_BUFFER_CAPACITY;
-    private long readTimeoutMillis = DEFAULT_READ_TIMEOUT_MILLIS;
-    private long writeTimeoutMillis = DEFAULT_WRITE_TIMEOUT_MILLIS;
+    private boolean isInitialized = false;
+    private int readBufferSize = DefaultSetting.DEFAULT_SERVER_BUFFER_SIZE;
+    private int writeBufferSize = DefaultSetting.DEFAULT_SERVER_BUFFER_SIZE;
+    private long readTimeoutMillis = DefaultSetting.DEFAULT_READ_TIMEOUT_MILLIS;
+    private long writeTimeoutMillis = DefaultSetting.DEFAULT_WRITE_TIMEOUT_MILLIS;
     private AsynchronousServerSocketChannel serverSocketChannel;
+    private ExecutorService acceptExecutor;
     private ExecutorService readExecutor;
     private ExecutorService writeExecutor;
 
@@ -58,20 +59,25 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
 
     @PostConstruct
     public void init() {
+        if (isInitialized) {
+            return;
+        }
+        isInitialized = true;
+        acceptExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoServerSocketChannel.class.getSimpleName() + "-Acceptor-" + serverPort));
+        readExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoServerSocketChannel.class.getSimpleName() + "-Reader-" + serverPort));
+        writeExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoServerSocketChannel.class.getSimpleName() + "-Writer-" + serverPort));
         try {
-            serverSocketChannel = AsynchronousServerSocketChannel.open();
+            serverSocketChannel = AsynchronousServerSocketChannel.open(AsynchronousChannelGroup.withThreadPool(acceptExecutor));
         } catch (IOException e) {
             throw new IllegalStateException("Unable to open server socket channel", e);
         }
-        readExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoServerSocketChannel.class.getSimpleName() + "-Reader-" + serverPort));
-        writeExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoServerSocketChannel.class.getSimpleName() + "-Writer-" + serverPort));
     }
 
     @Override
     public void start() throws IOException {
         serverSocketChannel.bind(serverSocketAddress);
-        LOGGER.debug("Bind to port " + serverPort);
-        readExecutor.execute(this::acceptNewConnection);
+        LOGGER.info("Bind to port " + serverPort);
+        acceptExecutor.execute(this::acceptNewConnection);
     }
 
     private void acceptNewConnection() {
@@ -81,22 +87,20 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
         serverSocketChannel.accept(null, new CompletionHandler<AsynchronousSocketChannel, Object>() {
             @Override
             public void completed(AsynchronousSocketChannel socketChannel, Object attachment) {
-                readExecutor.execute(() -> {
-                    SocketAddress remoteAddress = getRemoteAddress(socketChannel);
-                    LOGGER.debug("Accepted connection from " + remoteAddress);
-                    AsyncProtoSocketChannel protobufSocketChannel = createProtobufSocketChannel(socketChannel, remoteAddress);
-                    connectionHandlers.forEach(handler -> handler.onConnected(remoteAddress));
-                    socketChannels.put(remoteAddress, protobufSocketChannel);
-                    protobufSocketChannel.startReading();
-                    acceptNewConnection();
-                });
+                SocketAddress remoteAddress = getRemoteAddress(socketChannel);
+                LOGGER.info("Accepted connection from " + remoteAddress);
+                AsyncProtoSocketChannel protobufSocketChannel = createProtobufSocketChannel(socketChannel, remoteAddress);
+                connectionHandlers.forEach(handler -> handler.onConnected(remoteAddress));
+                socketChannels.put(remoteAddress, protobufSocketChannel);
+                protobufSocketChannel.startReading();
+                acceptNewConnection();
             }
 
             @Override
             public void failed(Throwable exc, Object attachment) {
                 LOGGER.error("Unable to accept new connection at port " + serverPort, exc);
                 if (serverSocketChannel.isOpen()) {
-                    readExecutor.execute(() -> acceptNewConnection());
+                    acceptNewConnection();
                 }
             }
         });
@@ -106,13 +110,14 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
         AsyncProtoSocketChannel protobufSocketChannel = new AsyncProtoSocketChannel(remoteAddress);
         protobufSocketChannel.setReadBufferSize(readBufferSize);
         protobufSocketChannel.setWriteBufferSize(writeBufferSize);
+        protobufSocketChannel.setConnectExecutor(acceptExecutor);
         protobufSocketChannel.setReadExecutor(readExecutor);
         protobufSocketChannel.setWriteExecutor(writeExecutor);
         protobufSocketChannel.setReadTimeoutMillis(readTimeoutMillis);
         protobufSocketChannel.setWriteTimeoutMillis(writeTimeoutMillis);
         protobufSocketChannel.setSocketChannel(socketChannel);
         protobufSocketChannel.addDisconnectionHandler((socketAddress) -> {
-            LOGGER.debug("Disconnected connection from " + socketAddress);
+            LOGGER.info("Disconnected from " + socketAddress);
             socketChannels.remove(socketAddress);
             disconnectionHandlers.forEach(handler -> handler.onDisconnected(socketAddress));
         });
@@ -140,6 +145,9 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
             serverSocketChannel.close();
         } catch (IOException e) {
             LOGGER.error("Unable to close server socket channel at port " + serverPort, e);
+        }
+        if (!acceptExecutor.isShutdown()) {
+            acceptExecutor.shutdown();
         }
         if (!readExecutor.isShutdown()) {
             readExecutor.shutdown();

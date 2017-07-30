@@ -4,8 +4,8 @@ import com.google.protobuf.Message;
 import com.quantran.protobuf.nio.handlers.ConnectionHandler;
 import com.quantran.protobuf.nio.handlers.DisconnectionHandler;
 import com.quantran.protobuf.nio.handlers.MessageReceivedHandler;
-import com.quantran.protobuf.nio.handlers.MessageSentHandler;
 import com.quantran.protobuf.nio.handlers.MessageSendFailureHandler;
+import com.quantran.protobuf.nio.handlers.MessageSentHandler;
 
 public interface ProtoSocketChannel {
 

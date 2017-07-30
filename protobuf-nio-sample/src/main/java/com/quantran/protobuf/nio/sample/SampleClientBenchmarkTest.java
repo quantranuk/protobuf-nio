@@ -1,8 +1,8 @@
 package com.quantran.protobuf.nio.sample;
 
 import com.google.protobuf.Message;
+import com.quantran.protobuf.nio.ProtoChannelFactory;
 import com.quantran.protobuf.nio.ProtoSocketChannel;
-import com.quantran.protobuf.nio.impl.AsyncProtoSocketChannel;
 import org.quantran.tools.sbm.proto.HeartBeat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,45 +21,37 @@ public class SampleClientBenchmarkTest {
     private static final int BENCHMARK_ITERATIONS = 1_000_000;
 
     private static MessageFactory messageFactory;
-    private static ProtoSocketChannel protoSocketChannel;
+    private static ProtoSocketChannel clientChannel;
     private static long heartBeatResponseReceived = 0;
     private static long benchmarkStartTime = 0;
-    private static CountDownLatch warmupLatch = new CountDownLatch(1);
+    private static CountDownLatch warmUpLatch = new CountDownLatch(1);
 
     public static void main(String[] args) {
         messageFactory = new MessageFactory();
-        protoSocketChannel = createProtobufSocketChannel(SERVER_HOST, SERVER_PORT);
-        protoSocketChannel.connect();
+        clientChannel = ProtoChannelFactory.newClient(SERVER_HOST, SERVER_PORT).build();
+        clientChannel.addMessageReceivedHandler(SampleClientBenchmarkTest::onMsgReceived);
+        clientChannel.addMessageSendFailureHandler(SampleClientBenchmarkTest::onMsgSendFailure);
+        clientChannel.connect();
         startBenchmark();
     }
 
     private static void startBenchmark() {
-        for (int i = 0; i < WARM_UP; i++) {
-            sendHeartBeatRequest();
+        warmUp();
+        benchmarkStartTime = System.currentTimeMillis();
+        for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
+            clientChannel.sendMessage(messageFactory.createHeartBeatRequest());
         }
+    }
 
+    private static void warmUp() {
+        for (int i = 0; i < WARM_UP; i++) {
+            clientChannel.sendMessage(messageFactory.createHeartBeatRequest());
+        }
         try {
-            warmupLatch.await();
+            warmUpLatch.await();
         } catch (InterruptedException e) {
             throw new IllegalStateException("Unexpected interruption while waiting for warming up");
         }
-
-        benchmarkStartTime = System.currentTimeMillis();
-        for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
-            sendHeartBeatRequest();
-        }
-    }
-
-    private static void sendHeartBeatRequest() {
-        protoSocketChannel.sendMessage(messageFactory.createHeartBeatRequest());
-    }
-
-    private static ProtoSocketChannel createProtobufSocketChannel(String host, int port) {
-        AsyncProtoSocketChannel channel = new AsyncProtoSocketChannel(host, port);
-        channel.addMessageReceivedHandler(SampleClientBenchmarkTest::onMsgReceived);
-        channel.addMessageSendFailureHandler((socketAddress, message, e) -> LOGGER.error("An error has occurred while sending msg " + message.getClass().getName(), e));
-        channel.init();
-        return channel;
     }
 
     private static void onMsgReceived(SocketAddress socketAddress, Message message) {
@@ -69,9 +61,8 @@ public class SampleClientBenchmarkTest {
         }
 
         heartBeatResponseReceived++;
-
         if (heartBeatResponseReceived == WARM_UP) {
-            warmupLatch.countDown();
+            warmUpLatch.countDown();
         } else if (heartBeatResponseReceived == WARM_UP + BENCHMARK_ITERATIONS) {
             long benchmarkEndTime = System.currentTimeMillis();
             BigDecimal benchmarkIterationBd = BigDecimal.valueOf(BENCHMARK_ITERATIONS);
@@ -79,8 +70,12 @@ public class SampleClientBenchmarkTest {
             LOGGER.info("Sending and receiving {} message took {} milliseconds", BENCHMARK_ITERATIONS, totalMillis);
             LOGGER.info("Throughput: {} messages per millisecond (round-trip)", benchmarkIterationBd.divide(BigDecimal.valueOf(totalMillis), 2, BigDecimal.ROUND_HALF_UP));
             LOGGER.info("Average: {} microseconds per message", BigDecimal.valueOf(totalMillis * 1000).divide(benchmarkIterationBd, 2, BigDecimal.ROUND_HALF_UP));
-            protoSocketChannel.disconnect();
+            clientChannel.disconnect();
         }
+    }
+
+    private static void onMsgSendFailure(SocketAddress socketAddress, Message message, Throwable t) {
+        LOGGER.error("An error has occurred while sending msg " + message.getClass().getName() + " to " + socketAddress, t);
     }
 
 }

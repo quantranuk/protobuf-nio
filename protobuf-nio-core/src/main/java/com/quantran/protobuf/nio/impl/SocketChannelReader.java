@@ -52,7 +52,7 @@ class SocketChannelReader implements CompletionHandler<Integer, Object> {
     }
 
     private void readNextBlock() {
-        if (readState == ReadState.STOPPED) {
+        if (readState == ReadState.STOPPED || !socketChannel.isOpen()) {
             return;
         }
         readBuffer.clear();

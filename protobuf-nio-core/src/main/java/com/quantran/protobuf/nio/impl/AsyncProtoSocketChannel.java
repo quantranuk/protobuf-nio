@@ -5,8 +5,9 @@ import com.quantran.protobuf.nio.ProtoSocketChannel;
 import com.quantran.protobuf.nio.handlers.ConnectionHandler;
 import com.quantran.protobuf.nio.handlers.DisconnectionHandler;
 import com.quantran.protobuf.nio.handlers.MessageReceivedHandler;
-import com.quantran.protobuf.nio.handlers.MessageSentHandler;
 import com.quantran.protobuf.nio.handlers.MessageSendFailureHandler;
+import com.quantran.protobuf.nio.handlers.MessageSentHandler;
+import com.quantran.protobuf.nio.utils.DefaultSetting;
 import com.quantran.protobuf.nio.utils.NamedThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +17,7 @@ import javax.annotation.PreDestroy;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.nio.channels.AsynchronousChannelGroup;
 import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.CompletionHandler;
 import java.util.List;
@@ -27,9 +29,6 @@ import java.util.concurrent.Executors;
 public class AsyncProtoSocketChannel implements ProtoSocketChannel {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AsyncProtoSocketChannel.class);
-    private static final int DEFAULT_BUFFER_CAPACITY = 4096;
-    private static final int DEFAULT_READ_TIMEOUT_MILLIS = 0;
-    private static final int DEFAULT_WRITE_TIMEOUT_MILLIS = 10000;
 
     private final List<ConnectionHandler> connectionHandlers = new CopyOnWriteArrayList<>();
     private final List<DisconnectionHandler> disconnectionHandlers = new CopyOnWriteArrayList<>();
@@ -42,15 +41,20 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
     private SocketChannelReader reader;
     private SocketChannelWriter writer;
 
-    private int readBufferSize = DEFAULT_BUFFER_CAPACITY;
-    private int writeBufferSize = DEFAULT_BUFFER_CAPACITY;
-    private long readTimeoutMillis = DEFAULT_READ_TIMEOUT_MILLIS;
-    private long writeTimeoutMillis = DEFAULT_WRITE_TIMEOUT_MILLIS;
+    private int readBufferSize = DefaultSetting.DEFAULT_CLIENT_BUFFER_SIZE;
+    private int writeBufferSize = DefaultSetting.DEFAULT_CLIENT_BUFFER_SIZE;
+    private int maxMessageWriteQueueSize = DefaultSetting.MAX_WRITE_MESSAGE_QUEUE_SIZE;
+    private long readTimeoutMillis = DefaultSetting.DEFAULT_READ_TIMEOUT_MILLIS;
+    private long writeTimeoutMillis = DefaultSetting.DEFAULT_WRITE_TIMEOUT_MILLIS;
+    private boolean isInitialized = false;
     private boolean isShuttingDown = false;
+    private boolean isInjectedConnectExecutor = false;
     private boolean isInjectedReadExecutor = false;
     private boolean isInjectedWriteExecutor = false;
+    private ExecutorService connectExecutor;
     private ExecutorService readExecutor;
     private ExecutorService writeExecutor;
+    private AsynchronousChannelGroup channelGroup;
 
     public AsyncProtoSocketChannel(SocketAddress socketAddress) {
         this.socketAddress = socketAddress;
@@ -62,6 +66,13 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
 
     @PostConstruct
     public void init() {
+        if (isInitialized) {
+            return;
+        }
+        isInitialized = true;
+        if (connectExecutor == null) {
+            connectExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoSocketChannel.class.getSimpleName() + "-Connector"));
+        }
         if (readExecutor == null) {
             readExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoSocketChannel.class.getSimpleName() + "-Reader"));
         }
@@ -70,20 +81,21 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         }
         if (socketChannel == null) {
             try {
-                socketChannel = AsynchronousSocketChannel.open();
+                channelGroup = AsynchronousChannelGroup.withThreadPool(connectExecutor);
+                socketChannel = AsynchronousSocketChannel.open(channelGroup);
             } catch (IOException e) {
                 throw new IllegalStateException("Unable to open socket channel", e);
             }
         }
         reader = new SocketChannelReader(socketChannel, socketAddress, readTimeoutMillis, readBufferSize, readExecutor, new MessageReadCompletionHandler());
-        writer = new SocketChannelWriter(socketChannel, writeTimeoutMillis, writeBufferSize, writeExecutor, new MessageWriteCompletionHandler());
+        writer = new SocketChannelWriter(socketChannel, writeTimeoutMillis, writeBufferSize, maxMessageWriteQueueSize, writeExecutor, new MessageWriteCompletionHandler());
     }
 
     @Override
     public void connect() {
         try {
             socketChannel.connect(socketAddress).get();
-            LOGGER.debug("Connected to "+ socketAddress);
+            LOGGER.debug("Connected to " + socketAddress);
             connectionHandlers.forEach(handler -> handler.onConnected(socketAddress));
             reader.start();
         } catch (InterruptedException e) {
@@ -115,6 +127,10 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         }
         LOGGER.debug("Disconnected from " + socketAddress);
         disconnectionHandlers.forEach(handler -> handler.onDisconnected(socketAddress));
+        if (!isInjectedConnectExecutor) {
+            channelGroup.shutdown();
+            connectExecutor.shutdown();
+        }
         if (!isInjectedReadExecutor) {
             readExecutor.shutdown();
         }
@@ -189,6 +205,10 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         this.writeBufferSize = writeBufferSize;
     }
 
+    public void setMaxMessageWriteQueueSize(int maxMessageWriteQueueSize) {
+        this.maxMessageWriteQueueSize = maxMessageWriteQueueSize;
+    }
+
     public void setReadTimeoutMillis(long readTimeoutMillis) {
         this.readTimeoutMillis = readTimeoutMillis;
     }
@@ -201,14 +221,19 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         this.socketChannel = socketChannel;
     }
 
-    void setReadExecutor(ExecutorService executor) {
-        this.readExecutor = executor;
-        this.isInjectedReadExecutor = true;
+    public void setConnectExecutor(ExecutorService executor) {
+        this.connectExecutor = executor;
+        this.isInjectedConnectExecutor = executor != null;
     }
 
-    void setWriteExecutor(ExecutorService executor) {
+    public void setReadExecutor(ExecutorService executor) {
+        this.readExecutor = executor;
+        this.isInjectedReadExecutor = executor != null;
+    }
+
+    public void setWriteExecutor(ExecutorService executor) {
         this.writeExecutor = executor;
-        this.isInjectedWriteExecutor = true;
+        this.isInjectedWriteExecutor = executor != null;
     }
 
     private class MessageReadCompletionHandler implements CompletionHandler<Long, Message> {
