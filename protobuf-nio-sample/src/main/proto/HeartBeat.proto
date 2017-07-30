@@ -1,0 +1,13 @@
+syntax = "proto3";
+package org.quantran.tools.sbm.proto;
+
+message HeartBeatRequest {
+    int64 requestTimeMillis = 1;
+    string requestMessage = 2;
+}
+
+message HeartBeatResponse {
+    int64 requestTimeMillis = 1;
+    int64 responseTimeMillis = 2;
+    string responseMessage = 3;
+}
