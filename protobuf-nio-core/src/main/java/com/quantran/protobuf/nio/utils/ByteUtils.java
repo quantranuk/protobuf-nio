@@ -47,18 +47,16 @@ public class ByteUtils {
         }
     }
 
-    public static String readString(byte[] b, int startPosition, int length) {
+    public static String readString(byte[] bytes, int startPosition, int length) {
         if (startPosition < 0 || length < 0) {
             throw new IllegalArgumentException("Invalid start position: " + startPosition + " length: " + length);
-        } else if (b.length < (startPosition + length)) {
-            throw new IllegalArgumentException("Invalid bytes array length of " + b.length + " for start position: " + startPosition);
+        } else if (bytes.length < (startPosition + length)) {
+            throw new IllegalArgumentException("Invalid bytes array length of " + bytes.length + " for start position: " + startPosition);
         } else if (length == 0) {
             return EMPTY_STRING;
         }
 
-        byte[] bytes = new byte[length];
-        System.arraycopy(b, startPosition, bytes, 0, length);
-        return CHARSET.decode(ByteBuffer.wrap(bytes)).toString();
+        return CHARSET.decode(ByteBuffer.wrap(bytes, startPosition, length)).toString();
     }
 
     public static long readLong(byte[] b, int startPosition) {

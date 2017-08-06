@@ -85,7 +85,7 @@ With buffer size = 8 Kb
 ```
 SampleClientBenchmarkTest - Sending and receiving 1000000 message took 2145 milliseconds
 SampleClientBenchmarkTest - Throughput: 466.20 messages per millisecond (round-trip)
-SampleClientBenchmarkTest - Average: 2.15 microseconds per message
+SampleClientBenchmarkTest - Average: 2.15 microseconds per message (round-trip)
 ```
 #### Multiple connections
 ```

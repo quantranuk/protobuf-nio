@@ -25,7 +25,6 @@ public class MultiClientsTest {
     private static MessageFactory messageFactory = new MessageFactory();
     private static long heartBeatResponseReceived = 0;
 
-    private static ExecutorService connectExecutor = Executors.newSingleThreadExecutor();
     private static ExecutorService readExecutor = Executors.newSingleThreadExecutor();
     private static ExecutorService writeExecutor = Executors.newSingleThreadExecutor();
 
@@ -33,7 +32,6 @@ public class MultiClientsTest {
         for (int i = 0; i < NO_OF_CLIENTS; i++) {
             ProtoSocketChannel clientChannel = ProtoChannelFactory
                     .newClient(SERVER_HOST, SERVER_PORT)
-                    .setConnectExecutor(connectExecutor)
                     .setReadExecutor(readExecutor)
                     .setWriteExecutor(writeExecutor)
                     .build();
@@ -45,7 +43,10 @@ public class MultiClientsTest {
             clientChannel.connect();
         }
         LOGGER.info("All {} clients are connected", NO_OF_CLIENTS);
-        CLIENT_CHANNELS.forEach(channel -> channel.sendMessage(messageFactory.createHeartBeatRequest()));
+
+        LOGGER.info("Sending heartbeat requests from all clients...");
+        HeartBeat.HeartBeatRequest heartBeatRequest = messageFactory.createHeartBeatRequest();
+        CLIENT_CHANNELS.forEach(channel -> channel.sendMessage(heartBeatRequest));
     }
 
     private static void onMessageReceived(SocketAddress socketAddress, Message message) {
@@ -54,7 +55,6 @@ public class MultiClientsTest {
             if (heartBeatResponseReceived == NO_OF_CLIENTS) {
                 LOGGER.info("All HeartBeat response messages have been received. Closing all clients..");
                 CLIENT_CHANNELS.forEach(ProtoSocketChannel::disconnect);
-                connectExecutor.shutdown();
                 readExecutor.shutdown();
                 writeExecutor.shutdown();
             }

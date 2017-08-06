@@ -11,6 +11,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * <p>A serializer to serialize Protobuf messages into bytes array and deserialize bytes array back into Protobuf message</p>
+ * <p>The class name of the protobuf is also serialized as part of the message. This is so that the deserialization process will be able to use the class name
+ * to re-construct the protobuf message using reflection.</p>
+ */
 public final class ProtobufSerializer {
 
     public static final int SIGNATURE = 0x7A6B5C4D;
@@ -22,6 +27,18 @@ public final class ProtobufSerializer {
     private static final Charset CHARSET = StandardCharsets.ISO_8859_1;
     private static final Map<ByteBuffer, Method> CACHED_PARSE_PROTOBUF_METHODS = new ConcurrentHashMap<>();
 
+    /**
+     * <p>Serialize a protobuf message into bytes array. The bytes array will contains in this order:</p>
+     * <ul>
+     *     <li>Integer: A simple signature so that the dezerialization can quickly detect corrupted data</li>
+     *     <li>Integer: The length of the protobuf class name</li>
+     *     <li>Integer: The length of the protobuf payload</li>
+     *     <li>bytes[]: The decoded protobuf class name in bytes (ISO_8859_1)</li>
+     *     <li>bytes[]: The protobuf payload in bytes</li>
+     * </ul>
+     * @param message the protobuf message
+     * @return serialized byte arrays
+     */
     public static byte[] serialize(Message message) {
         ByteBuffer encodedProtobufClassName = CHARSET.encode(message.getClass().getName());
         int protobufClassNameLength = encodedProtobufClassName.capacity();
@@ -38,22 +55,48 @@ public final class ProtobufSerializer {
         return buffer.array();
     }
 
+    /**
+     * Get the size (in number of bytes) of a fully serialized protobut message, including all the header information.
+     * @param message the protobuf message
+     * @return the size of a fully serialized message in bytes (including the header size)
+     */
     public static int getSerializedSize(Message message) {
         return HEADER_LENGTH + message.getClass().getName().length() + message.getSerializedSize();
     }
 
+    /**
+     * Check if the header started with a valid signature
+     * @param header the message header
+     * @return true if the signature if the header is valid
+     */
     public static boolean hasValidHeaderSignature(byte[] header) {
         return ByteUtils.readInteger(header, 0) == SIGNATURE;
     }
 
+    /**
+     * Get the length of the protobuf class name
+     * @param header the message header
+     * @return the length of the protobuf class name
+     */
     public static int extractProtobufClassnameLength(byte[] header) {
         return ByteUtils.readInteger(header, Integer.BYTES);
     }
 
+    /**
+     * Get the length of the protobuf payload
+     * @param header the message header
+     * @return the length of the protobuf payload
+     */
     public static int extractProtobufPayloadLength(byte[] header) {
         return ByteUtils.readInteger(header, Integer.BYTES + Integer.BYTES);
     }
 
+    /**
+     * Deserialized a protobuf message using protobuf payload and the class name information
+     * @param protobufClassNameBuffer the buffer that contains the class name of the protobuf
+     * @param protobufPayloadBuffer the buffer that contains the protobuf payload
+     * @return the protobuf message
+     */
     public static Message deserialize(ByteBuffer protobufClassNameBuffer, ByteBuffer protobufPayloadBuffer) {
         final Method protobufParseMethod = getParseMethod(protobufClassNameBuffer);
         try {

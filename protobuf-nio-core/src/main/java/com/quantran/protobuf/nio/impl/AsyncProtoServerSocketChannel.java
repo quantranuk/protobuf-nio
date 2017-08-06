@@ -22,6 +22,8 @@ import java.nio.channels.AsynchronousChannelGroup;
 import java.nio.channels.AsynchronousServerSocketChannel;
 import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.CompletionHandler;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -110,7 +112,6 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
         AsyncProtoSocketChannel protobufSocketChannel = new AsyncProtoSocketChannel(remoteAddress);
         protobufSocketChannel.setReadBufferSize(readBufferSize);
         protobufSocketChannel.setWriteBufferSize(writeBufferSize);
-        protobufSocketChannel.setConnectExecutor(acceptExecutor);
         protobufSocketChannel.setReadExecutor(readExecutor);
         protobufSocketChannel.setWriteExecutor(writeExecutor);
         protobufSocketChannel.setReadTimeoutMillis(readTimeoutMillis);
@@ -162,6 +163,21 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
     public void sendMessage(SocketAddress socketAddress, Message message) {
         ProtoSocketChannel protoSocketChannel = socketChannels.get(socketAddress);
         protoSocketChannel.sendMessage(message);
+    }
+
+    @Override
+    public void sendMessageToAll(Message message) {
+        socketChannels.values().forEach(channel -> channel.sendMessage(message));
+    }
+
+    @Override
+    public Collection<SocketAddress> getConnectedAddresses() {
+        return Collections.unmodifiableCollection(socketChannels.keySet());
+    }
+
+    @Override
+    public boolean isConnected(SocketAddress socketAddress) {
+        return socketChannels.containsKey(socketAddress);
     }
 
     @Override

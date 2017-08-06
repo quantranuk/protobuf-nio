@@ -2,7 +2,7 @@ package com.quantran.protobuf.nio.impl;
 
 import com.google.protobuf.Message;
 import com.quantran.protobuf.nio.serializer.ProtobufSerializer;
-import com.quantran.protobuf.nio.utils.ByteArrayStack;
+import com.quantran.protobuf.nio.utils.ByteArrayDequeue;
 
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousSocketChannel;
@@ -22,7 +22,7 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
     private final ExecutorService writeExecutor;
     private final Queue<Message> outboundMessageQueue;
     private final long writeTimeoutMillis;
-    private final ByteArrayStack writeStack;
+    private final ByteArrayDequeue writeBytesQueue;
     private final ByteBuffer writeBuffer;
     private final int writeBufferCapacity;
     private final List<Message> messagesBeingWritten;
@@ -37,7 +37,7 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
         this.outboundMessageQueue = new ArrayDeque<>();
         this.writeTimeoutMillis = writeTimeoutMillis;
         this.isWritingInProgress = new AtomicBoolean();
-        this.writeStack = new ByteArrayStack();
+        this.writeBytesQueue = new ByteArrayDequeue();
         this.writeBufferCapacity = writeBufferCapacity;
         this.messagesBeingWritten = new ArrayList<>();
         this.writeBuffer = ByteBuffer.allocate(writeBufferCapacity);
@@ -81,13 +81,13 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
     }
 
     private void writeMessages(List<Message> messages) {
-        writeStack.clear();
-        messages.forEach(message -> writeStack.push(ProtobufSerializer.serialize(message)));
+        writeBytesQueue.clear();
+        messages.forEach(message -> writeBytesQueue.push(ProtobufSerializer.serialize(message)));
         writeNextBlock(messages);
     }
 
     private void writeNextBlock(List<Message> messages) {
-        ByteBuffer nextBlock = writeStack.popMaximum(writeBufferCapacity);
+        ByteBuffer nextBlock = writeBytesQueue.popMaximum(writeBufferCapacity);
         if (nextBlock == null) {
             messages.forEach(message -> messageWriteCompletionHandler.completed((long) ProtobufSerializer.getSerializedSize(message), message));
             checkMessageQueue();
@@ -105,7 +105,7 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
         writeExecutor.execute(() -> {
             int unwrittenBytes = writeBuffer.limit() - result;
             if (unwrittenBytes > 0) {
-                writeStack.pushLast(writeBuffer.array(), result, unwrittenBytes);
+                writeBytesQueue.pushLast(writeBuffer.array(), result, unwrittenBytes);
             }
             writeNextBlock(messages);
         });

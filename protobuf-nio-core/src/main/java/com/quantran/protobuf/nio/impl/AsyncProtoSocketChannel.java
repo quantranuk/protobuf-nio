@@ -25,6 +25,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 
 public class AsyncProtoSocketChannel implements ProtoSocketChannel {
 
@@ -48,10 +49,8 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
     private long writeTimeoutMillis = DefaultSetting.DEFAULT_WRITE_TIMEOUT_MILLIS;
     private boolean isInitialized = false;
     private boolean isShuttingDown = false;
-    private boolean isInjectedConnectExecutor = false;
     private boolean isInjectedReadExecutor = false;
     private boolean isInjectedWriteExecutor = false;
-    private ExecutorService connectExecutor;
     private ExecutorService readExecutor;
     private ExecutorService writeExecutor;
     private AsynchronousChannelGroup channelGroup;
@@ -70,9 +69,6 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
             return;
         }
         isInitialized = true;
-        if (connectExecutor == null) {
-            connectExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoSocketChannel.class.getSimpleName() + "-Connector"));
-        }
         if (readExecutor == null) {
             readExecutor = Executors.newSingleThreadExecutor(new NamedThreadFactory(AsyncProtoSocketChannel.class.getSimpleName() + "-Reader"));
         }
@@ -81,7 +77,7 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         }
         if (socketChannel == null) {
             try {
-                channelGroup = AsynchronousChannelGroup.withThreadPool(connectExecutor);
+                channelGroup = AsynchronousChannelGroup.withThreadPool(readExecutor); // Use the read executor
                 socketChannel = AsynchronousSocketChannel.open(channelGroup);
             } catch (IOException e) {
                 throw new IllegalStateException("Unable to open socket channel", e);
@@ -118,7 +114,7 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         if (reader != null) {
             reader.stop();
         }
-        if (socketChannel != null && socketChannel.isOpen()) {
+        if (socketChannel != null) {
             try {
                 socketChannel.close();
             } catch (IOException e) {
@@ -127,10 +123,6 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         }
         LOGGER.debug("Disconnected from " + socketAddress);
         disconnectionHandlers.forEach(handler -> handler.onDisconnected(socketAddress));
-        if (!isInjectedConnectExecutor) {
-            channelGroup.shutdown();
-            connectExecutor.shutdown();
-        }
         if (!isInjectedReadExecutor) {
             readExecutor.shutdown();
         }
@@ -221,19 +213,22 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         this.socketChannel = socketChannel;
     }
 
-    public void setConnectExecutor(ExecutorService executor) {
-        this.connectExecutor = executor;
-        this.isInjectedConnectExecutor = executor != null;
-    }
-
     public void setReadExecutor(ExecutorService executor) {
+        validateSingleThreadedPool(executor);
         this.readExecutor = executor;
         this.isInjectedReadExecutor = executor != null;
     }
 
     public void setWriteExecutor(ExecutorService executor) {
+        validateSingleThreadedPool(executor);
         this.writeExecutor = executor;
         this.isInjectedWriteExecutor = executor != null;
+    }
+
+    private static void validateSingleThreadedPool(ExecutorService executor) {
+        if (executor instanceof ThreadPoolExecutor && ((ThreadPoolExecutor) executor).getMaximumPoolSize() != 1) {
+            throw new IllegalStateException("This class can only support single-threaded pool");
+        }
     }
 
     private class MessageReadCompletionHandler implements CompletionHandler<Long, Message> {

@@ -9,15 +9,15 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
-public class ByteArrayStackTest {
+public class ByteArrayDequeueTest {
 
     private static final Charset CHARSET = StandardCharsets.ISO_8859_1;
 
-    ByteArrayStack underTest;
+    ByteArrayDequeue underTest;
 
     @Before
     public void setUp() {
-        underTest = new ByteArrayStack();
+        underTest = new ByteArrayDequeue();
     }
 
     @Test
@@ -32,7 +32,7 @@ public class ByteArrayStackTest {
 
     @Test
     public void testPushingBigArray() {
-        ByteArrayStack stack = new ByteArrayStack(5);
+        ByteArrayDequeue stack = new ByteArrayDequeue(5);
         String longText = "ABCDEFGHIJKLMLOP";
         stack.push(CHARSET.encode(longText).array());
         assertEquals(longText, CHARSET.decode(stack.popExactly(longText.length())).toString());

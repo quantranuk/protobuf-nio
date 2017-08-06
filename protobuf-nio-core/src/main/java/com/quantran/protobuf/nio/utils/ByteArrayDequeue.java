@@ -2,7 +2,10 @@ package com.quantran.protobuf.nio.utils;
 
 import java.nio.ByteBuffer;
 
-public final class ByteArrayStack {
+/**
+ * A simple dequeue to store bytes. This class is not thread-safe. The pop action will not allocate new memory.
+ */
+public final class ByteArrayDequeue {
 
     private static final int INITIAL_CAPACITY = 8192;
 
@@ -11,22 +14,36 @@ public final class ByteArrayStack {
     private int limit = 0;
     private int remaining = 0;
 
-    public ByteArrayStack() {
+    public ByteArrayDequeue() {
         primaryArray = new byte[INITIAL_CAPACITY];
     }
 
-    ByteArrayStack(int initalCapacity) {
+    ByteArrayDequeue(int initalCapacity) {
         primaryArray = new byte[initalCapacity];
     }
 
+    /**
+     * Get the size of the remaining bytes in the queue
+     * @return Remaining bytes size
+     */
     public int getRemaining() {
         return remaining;
     }
 
+    /**
+     * Push a bytes array to the front of the queue
+     * @param src bytes
+     */
     public void push(byte[] src) {
         push(src, 0, src.length);
     }
 
+    /**
+     * Push a bytes array to the front of the queue
+     * @param src source bytes
+     * @param srcOffset source offset
+     * @param srcLengthToPush length to push
+     */
     public void push(byte[] src, int srcOffset, int srcLengthToPush) {
         assertLengthToPush(srcLengthToPush);
         int newLength = remaining + srcLengthToPush;
@@ -105,7 +122,7 @@ public final class ByteArrayStack {
     }
 
     private void allocateMoreSpace(int newLength) {
-        byte[] newAllocation = new byte[newLength * 2];
+        byte[] newAllocation = new byte[newLength + Integer.min(newLength, Integer.MAX_VALUE - newLength)];
         System.arraycopy(primaryArray, position, newAllocation, 0, remaining);
         primaryArray = newAllocation;
         position = 0;

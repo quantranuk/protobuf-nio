@@ -2,9 +2,7 @@ package com.quantran.protobuf.nio.impl;
 
 import com.google.protobuf.Message;
 import com.quantran.protobuf.nio.serializer.ProtobufSerializer;
-import com.quantran.protobuf.nio.utils.ByteArrayStack;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.quantran.protobuf.nio.utils.ByteArrayDequeue;
 
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
@@ -15,11 +13,9 @@ import java.util.concurrent.TimeUnit;
 
 class SocketChannelReader implements CompletionHandler<Integer, Object> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(SocketChannelReader.class);
-
     private final ByteBuffer readBuffer;
     private final byte[] header;
-    private final ByteArrayStack readStack;
+    private final ByteArrayDequeue readByteQueue;
     private final AsynchronousSocketChannel socketChannel;
     private final SocketAddress socketAddress;
     private final CompletionHandler<Long, Message> messageReadCompletionHandler;
@@ -38,7 +34,7 @@ class SocketChannelReader implements CompletionHandler<Integer, Object> {
         this.readTimeoutMillis = readTimeoutMillis;
         this.readBuffer = ByteBuffer.allocate(readBufferCapacity);
         this.header = new byte[ProtobufSerializer.HEADER_LENGTH];
-        this.readStack = new ByteArrayStack();
+        this.readByteQueue = new ByteArrayDequeue();
         this.messageReadCompletionHandler = messageReadCompletionHandler;
     }
 
@@ -70,7 +66,7 @@ class SocketChannelReader implements CompletionHandler<Integer, Object> {
                 failed(new IllegalStateException("Reached end-of-stream of " + socketAddress), null);
             } else if (readLength > 0) {
                 readBuffer.flip();
-                readStack.push(readBuffer.array(), readBuffer.position(), readBuffer.limit());
+                readByteQueue.push(readBuffer.array(), readBuffer.position(), readBuffer.limit());
 
                 boolean hasRemainingData = true;
                 while(hasRemainingData) {
@@ -95,10 +91,10 @@ class SocketChannelReader implements CompletionHandler<Integer, Object> {
     }
 
     private boolean processHeader() {
-        if (readStack.getRemaining() < header.length) {
+        if (readByteQueue.getRemaining() < header.length) {
             return false;
         }
-        readStack.popExactly(header);
+        readByteQueue.popExactly(header);
         if (ProtobufSerializer.hasValidHeaderSignature(header)) {
             protobufClassNameLength = ProtobufSerializer.extractProtobufClassnameLength(header);
             protobufPayloadLength = ProtobufSerializer.extractProtobufPayloadLength(header);
@@ -111,11 +107,11 @@ class SocketChannelReader implements CompletionHandler<Integer, Object> {
     }
 
     private boolean processBody() {
-        if (readStack.getRemaining() < protobufClassNameLength + protobufPayloadLength) {
+        if (readByteQueue.getRemaining() < protobufClassNameLength + protobufPayloadLength) {
             return false;
         }
-        ByteBuffer protobufClassNameBytes = readStack.popExactly(protobufClassNameLength);
-        ByteBuffer protobufPayloadBytes = readStack.popExactly(protobufPayloadLength);
+        ByteBuffer protobufClassNameBytes = readByteQueue.popExactly(protobufClassNameLength);
+        ByteBuffer protobufPayloadBytes = readByteQueue.popExactly(protobufPayloadLength);
         Message message = ProtobufSerializer.deserialize(protobufClassNameBytes, protobufPayloadBytes);
         messageReadCompletionHandler.completed((long) protobufPayloadLength, message);
         readState = ReadState.READING_MESSAGE_HEADER;

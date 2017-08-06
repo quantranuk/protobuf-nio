@@ -6,6 +6,9 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * A simple non-deamon thread factory that print out uncaught exceptions
+ */
 public class NamedThreadFactory implements ThreadFactory {
 
     private static final int STACK_SIZE = 0;
