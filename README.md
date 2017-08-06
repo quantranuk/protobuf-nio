@@ -35,7 +35,12 @@ server.sendMessage(protobufMessage);
 public interface ProtoServerSocketChannel { 
     void start() throws IOException;
     void stop();
+ 
+    Collection<SocketAddress> getConnectedAddresses();
+    boolean isConnected(SocketAddress socketAddress);
+ 
     void sendMessage(SocketAddress socketAddress, Message message);
+    void sendMessageToAll(Message message);
  
     void addConnectionHandler(ConnectionHandler handler);
     void addDisconnectionHandler(DisconnectionHandler handler);
