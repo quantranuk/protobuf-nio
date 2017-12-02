@@ -6,10 +6,10 @@
 
     <groupId>com.github.quantranuk</groupId>
     <artifactId>protobuf-nio</artifactId>
-    <version>1.0.0-rc.4</version>
+    <version>1.0.0</version>
     <modules>
         <module>protobuf-nio-core</module>
-        <module>protobuf-nio-sample</module>
+        <!--<module>protobuf-nio-sample</module>-->
     </modules>
     <packaging>pom</packaging>
 
