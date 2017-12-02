@@ -4,8 +4,8 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <parent>
         <artifactId>protobuf-nio</artifactId>
-        <groupId>com.quantran</groupId>
-        <version>1.0.0-rc.3</version>
+        <groupId>com.github.quantranuk</groupId>
+        <version>1.0.0-rc.4</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -18,7 +18,7 @@
 
     <dependencies>
         <dependency>
-            <groupId>com.quantran</groupId>
+            <groupId>com.github.quantranuk</groupId>
             <artifactId>protobuf-nio-core</artifactId>
             <version>${project.version}</version>
         </dependency>
@@ -26,7 +26,7 @@
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
-            <version>3.3.0</version>
+            <version>3.5.0</version>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
@@ -54,15 +54,6 @@
 
     <build>
         <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.6.1</version>
-                <configuration>
-                    <source>1.8</source>
-                    <target>1.8</target>
-                </configuration>
-            </plugin>
             <plugin>
                 <groupId>org.xolstice.maven.plugins</groupId>
                 <artifactId>protobuf-maven-plugin</artifactId>

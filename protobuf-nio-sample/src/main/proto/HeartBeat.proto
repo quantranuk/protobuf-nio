@@ -1,5 +1,5 @@
 syntax = "proto3";
-package org.quantran.tools.sbm.proto;
+package com.github.quantranuk.protonio.sample;
 
 message HeartBeatRequest {
     int64 requestTimeMillis = 1;
