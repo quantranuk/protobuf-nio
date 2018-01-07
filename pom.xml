@@ -9,7 +9,7 @@
     <version>1.0.1-SNAPSHOT</version>
     <modules>
         <module>protobuf-nio-core</module>
-        <!--<module>protobuf-nio-sample</module>-->
+        <module>protobuf-nio-sample</module>
     </modules>
     <packaging>pom</packaging>
 
