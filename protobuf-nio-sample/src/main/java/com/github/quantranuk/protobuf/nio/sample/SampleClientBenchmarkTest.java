@@ -22,7 +22,7 @@ public class SampleClientBenchmarkTest {
 
     private static MessageFactory messageFactory;
     private static ProtoSocketChannel clientChannel;
-    private static long heartBeatResponseReceived = 0;
+    private static int heartBeatResponseReceived = 0;
     private static long benchmarkStartTime = 0;
     private static CountDownLatch warmUpLatch = new CountDownLatch(1);
 
@@ -61,15 +61,16 @@ public class SampleClientBenchmarkTest {
         }
 
         heartBeatResponseReceived++;
-        if (heartBeatResponseReceived == WARM_UP) {
+        if (heartBeatResponseReceived < WARM_UP) {
+            // Do nothing
+        } else if (heartBeatResponseReceived == WARM_UP) {
             warmUpLatch.countDown();
         } else if (heartBeatResponseReceived == WARM_UP + BENCHMARK_ITERATIONS) {
             long benchmarkEndTime = System.currentTimeMillis();
             BigDecimal benchmarkIterationBd = BigDecimal.valueOf(BENCHMARK_ITERATIONS);
-            long totalMillis = benchmarkEndTime - benchmarkStartTime;
+            BigDecimal totalMillis = BigDecimal.valueOf(benchmarkEndTime - benchmarkStartTime);
             LOGGER.info("Sending and receiving {} message took {} milliseconds", BENCHMARK_ITERATIONS, totalMillis);
-            LOGGER.info("Throughput: {} messages per millisecond (round-trip)", benchmarkIterationBd.divide(BigDecimal.valueOf(totalMillis), 2, BigDecimal.ROUND_HALF_UP));
-            LOGGER.info("Average: {} microseconds per message", BigDecimal.valueOf(totalMillis * 1000).divide(benchmarkIterationBd, 2, BigDecimal.ROUND_HALF_UP));
+            LOGGER.info("Average throughput: {} messages per millisecond (round-trip)", benchmarkIterationBd.divide(totalMillis, 2, BigDecimal.ROUND_HALF_UP));
             clientChannel.disconnect();
         }
     }

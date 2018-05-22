@@ -6,10 +6,12 @@ Simple library to send and receive [protobuf messages](https://developers.google
 - Pure Java NIO sockets (no netty / mina dependencies)
 - Protobuf-friendly API's
 - Good throughput
-- Can handle many connections
+- Scalable: Handles many connections from a single thread
 
 ##### Cons
 - No support for SSL/TLS yet
+
+_Note: due to the way [SSL Engine](https://docs.oracle.com/javase/8/docs/api/javax/net/ssl/SSLEngine.html) is implemented, adding SSL/TLS support will require major change to the code, this is also complained in [here](https://jfarcand.wordpress.com/2006/09/21/tricks-and-tips-with-nio-part-v-ssl-and-nio-friend-or-foe) and [here](https://stackoverflow.com/questions/9118367/java-nio-channels-and-tls)_
 
 ## Getting Started
 
@@ -30,27 +32,6 @@ server.start();
 server.sendMessage(protobufMessage);
 ```
 
-##### ProtoServerSocketChannel interface
-```
-public interface ProtoServerSocketChannel { 
-    void start() throws IOException;
-    void stop();
- 
-    Collection<SocketAddress> getConnectedAddresses();
-    boolean isConnected(SocketAddress socketAddress);
- 
-    void sendMessage(SocketAddress socketAddress, Message message);
-    void sendMessageToAll(Message message);
- 
-    void addConnectionHandler(ConnectionHandler handler);
-    void addDisconnectionHandler(DisconnectionHandler handler);
-    void addMessageReceivedHandler(MessageReceivedHandler handler);
-    void addMessageSentHandler(MessageSentHandler handler);
-    void addMessageSendFailureHandler(MessageSendFailureHandler handler);
-    ...
-}
-```
-
 ### Client side
 ##### Create client and connect
 ```
@@ -68,31 +49,14 @@ client.connect();
 client.sendMessage(protobufMessage);
 ```
 
-##### ProtoSocketChannel interface
-```
-public interface ProtoSocketChannel { 
-    void connect();
-    void disconnect();
-    void sendMessage(Message message);
- 
-    void addConnectionHandler(ConnectionHandler handler);
-    void addDisconnectionHandler(DisconnectionHandler handler);
-    void addMessageReceivedHandler(MessageReceivedHandler handler);
-    void addMessageSentHandler(MessageSentHandler handler);
-    void addMessageSendFailureHandler(MessageSendFailureHandler handler);
-    ...
-}
-```
-
 ## Benchmark
 #### Throughput
 With buffer size = 8 Kb
 ```
 SampleClientBenchmarkTest - Sending and receiving 1000000 message took 2145 milliseconds
 SampleClientBenchmarkTest - Throughput: 466.20 messages per millisecond (round-trip)
-SampleClientBenchmarkTest - Average: 2.15 microseconds per message (round-trip)
 ```
-#### Multiple connections
+#### Handle multiple connections from a single thread
 ```
 ...
 MultiClientsTest - Client 14996 is connected
