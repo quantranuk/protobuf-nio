@@ -5,7 +5,7 @@
     <parent>
         <artifactId>protobuf-nio</artifactId>
         <groupId>com.github.quantranuk</groupId>
-        <version>1.0.2-SNAPSHOT/version>
+        <version>1.0.2-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -74,7 +74,7 @@
                             <goal>test-compile</goal>
                         </goals>
                         <configuration>
-                            <protocArtifact>com.google.protobuf:protoc:3.16.1:exe:${os.detected.classifier}
+                            <protocArtifact>com.google.protobuf:protoc:3.25.5:exe:${os.detected.classifier}
                             </protocArtifact>
                         </configuration>
                     </execution>
