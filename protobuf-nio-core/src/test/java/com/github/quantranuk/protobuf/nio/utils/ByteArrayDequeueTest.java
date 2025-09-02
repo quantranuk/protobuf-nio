@@ -1,13 +1,14 @@
 package com.github.quantranuk.protobuf.nio.utils;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class ByteArrayDequeueTest {
 
@@ -15,7 +16,7 @@ public class ByteArrayDequeueTest {
 
     ByteArrayDequeue underTest;
 
-    @Before
+    @BeforeEach
     public void setUp() {
         underTest = new ByteArrayDequeue();
     }
@@ -46,11 +47,15 @@ public class ByteArrayDequeueTest {
         assertEquals("GHKABCDEF", pop(9));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void popEmptyArray() {
-        underTest.push(CHARSET.encode("ABCD").array());
-        underTest.popExactly(10);
-        fail();
+        try {
+            underTest.push(CHARSET.encode("ABCD").array());
+            underTest.popExactly(10);
+            fail();
+        } catch (IllegalStateException e) {
+            assertEquals("Not enough remaining bytes. Expect 10 but remaining is only 4", e.getMessage());
+        }
     }
 
     private void push(String str) {

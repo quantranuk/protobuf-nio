@@ -2,12 +2,13 @@ package com.github.quantranuk.protobuf.nio.serializer;
 
 import com.github.quantranuk.protobuf.nio.proto.TestHeartBeat;
 import com.google.protobuf.Message;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+
 
 public class ProtobufSerializerTest {
 
@@ -38,7 +39,7 @@ public class ProtobufSerializerTest {
         serializedByteBuffer.get(protobufPayloadBytes);
 
         Message deserializedMessage = ProtobufSerializer.deserialize(ByteBuffer.wrap(protobufClassNameBytes), ByteBuffer.wrap(protobufPayloadBytes));
-        assertTrue(deserializedMessage instanceof TestHeartBeat.HeartBeatRequest);
+        assertInstanceOf(TestHeartBeat.HeartBeatRequest.class, deserializedMessage);
 
         assertEquals(requestTimeMillis, ((TestHeartBeat.HeartBeatRequest) deserializedMessage).getRequestTimeMillis());
         assertEquals(requestMessage, ((TestHeartBeat.HeartBeatRequest) deserializedMessage).getRequestMessage());
