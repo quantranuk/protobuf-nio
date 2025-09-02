@@ -53,8 +53,8 @@ client.sendMessage(protobufMessage);
 #### Throughput
 With buffer size = 8 Kb
 ```
-SampleClientBenchmarkTest - Sending and receiving 1000000 message took 2145 milliseconds
-SampleClientBenchmarkTest - Throughput: 466.20 messages per millisecond (round-trip)
+SampleClientBenchmarkTest - Sending and receiving 1_000_000 messages took 1204 milliseconds
+SampleClientBenchmarkTest - Average throughput: 830.56 messages per millisecond (round-trip)
 ```
 #### Handle multiple connections from a single thread
 ```
