@@ -59,7 +59,7 @@ public class ByteUtilsTest {
 
         msg = "";
         ByteUtils.writeString(b, startPosition, msg);
-        assertEquals(msg, ByteUtils.readString(b, startPosition, msg.length()));
+        assertEquals(msg, ByteUtils.readString(b, startPosition, 0));
     }
 
 }

@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.net.SocketAddress;
 import java.util.concurrent.CountDownLatch;
 
@@ -19,12 +20,12 @@ public class SampleClientBenchmarkTest {
     private static final int SERVER_PORT = 3456;
     private static final int WARM_UP = 200;
     private static final int BENCHMARK_ITERATIONS = 1_000_000;
+    private static final CountDownLatch WARM_UP_LATCH = new CountDownLatch(1);
 
     private static MessageFactory messageFactory;
     private static ProtoSocketChannel clientChannel;
     private static int heartBeatResponseReceived = 0;
     private static long benchmarkStartTime = 0;
-    private static CountDownLatch warmUpLatch = new CountDownLatch(1);
 
     public static void main(String[] args) {
         messageFactory = new MessageFactory();
@@ -48,7 +49,7 @@ public class SampleClientBenchmarkTest {
             clientChannel.sendMessage(messageFactory.createHeartBeatRequest());
         }
         try {
-            warmUpLatch.await();
+            WARM_UP_LATCH.await();
         } catch (InterruptedException e) {
             throw new IllegalStateException("Unexpected interruption while waiting for warming up");
         }
@@ -61,22 +62,22 @@ public class SampleClientBenchmarkTest {
         }
 
         heartBeatResponseReceived++;
-        if (heartBeatResponseReceived < WARM_UP) {
-            // Do nothing
-        } else if (heartBeatResponseReceived == WARM_UP) {
-            warmUpLatch.countDown();
-        } else if (heartBeatResponseReceived == WARM_UP + BENCHMARK_ITERATIONS) {
-            long benchmarkEndTime = System.currentTimeMillis();
-            BigDecimal benchmarkIterationBd = BigDecimal.valueOf(BENCHMARK_ITERATIONS);
-            BigDecimal totalMillis = BigDecimal.valueOf(benchmarkEndTime - benchmarkStartTime);
-            LOGGER.info("Sending and receiving {} message took {} milliseconds", BENCHMARK_ITERATIONS, totalMillis);
-            LOGGER.info("Average throughput: {} messages per millisecond (round-trip)", benchmarkIterationBd.divide(totalMillis, 2, BigDecimal.ROUND_HALF_UP));
-            clientChannel.disconnect();
+        if (heartBeatResponseReceived >= WARM_UP) {
+            if (heartBeatResponseReceived == WARM_UP) {
+                WARM_UP_LATCH.countDown();
+            } else if (heartBeatResponseReceived == WARM_UP + BENCHMARK_ITERATIONS) {
+                long benchmarkEndTime = System.currentTimeMillis();
+                BigDecimal benchmarkIterationBd = BigDecimal.valueOf(BENCHMARK_ITERATIONS);
+                BigDecimal totalMillis = BigDecimal.valueOf(benchmarkEndTime - benchmarkStartTime);
+                LOGGER.info("Sending and receiving {} message took {} milliseconds", BENCHMARK_ITERATIONS, totalMillis);
+                LOGGER.info("Average throughput: {} messages per millisecond (round-trip)", benchmarkIterationBd.divide(totalMillis, 2, RoundingMode.HALF_UP));
+                clientChannel.disconnect();
+            }
         }
     }
 
     private static void onMsgSendFailure(SocketAddress socketAddress, Message message, Throwable t) {
-        LOGGER.error("An error has occurred while sending msg " + message.getClass().getName() + " to " + socketAddress, t);
+        LOGGER.error("An error has occurred while sending msg {} to {}", message.getClass().getName(), socketAddress, t);
     }
 
 }

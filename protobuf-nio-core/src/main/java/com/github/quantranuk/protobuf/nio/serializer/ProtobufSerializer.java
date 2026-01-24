@@ -20,17 +20,17 @@ public final class ProtobufSerializer {
 
     public static final int SIGNATURE = 0x7A6B5C4D;
     public static final int SIGNATURE_LENGTH = Integer.BYTES;
-    public static final int PROTO_CLASSNAME_LENGTH = Integer.BYTES;
+    public static final int PROTO_CLASS_NAME_LENGTH = Integer.BYTES;
     public static final int PROTO_PAYLOAD_LENGTH = Integer.BYTES;
-    public static final int HEADER_LENGTH = SIGNATURE_LENGTH + PROTO_CLASSNAME_LENGTH + PROTO_PAYLOAD_LENGTH;
+    public static final int HEADER_LENGTH = SIGNATURE_LENGTH + PROTO_CLASS_NAME_LENGTH + PROTO_PAYLOAD_LENGTH;
 
     private static final Charset CHARSET = StandardCharsets.ISO_8859_1;
     private static final Map<ByteBuffer, Method> CACHED_PARSE_PROTOBUF_METHODS = new ConcurrentHashMap<>();
 
     /**
-     * <p>Serialize a protobuf message into bytes array. The bytes array will contains in this order:</p>
+     * <p>Serialize a protobuf message into bytes array. The bytes array will contain in this order:</p>
      * <ul>
-     *     <li>Integer: A simple signature so that the dezerialization can quickly detect corrupted data</li>
+     *     <li>Integer: A simple signature so that the deserialization can quickly detect corrupted data</li>
      *     <li>Integer: The length of the protobuf class name</li>
      *     <li>Integer: The length of the protobuf payload</li>
      *     <li>bytes[]: The decoded protobuf class name in bytes (ISO_8859_1)</li>
@@ -43,20 +43,20 @@ public final class ProtobufSerializer {
         ByteBuffer encodedProtobufClassName = CHARSET.encode(message.getClass().getName());
         int protobufClassNameLength = encodedProtobufClassName.capacity();
 
-        byte[] protbufPayload = message.toByteArray();
-        int protbufPayloadLength = protbufPayload.length;
+        byte[] protobufPayload = message.toByteArray();
+        int protobufPayloadLength = protobufPayload.length;
 
-        ByteBuffer buffer = ByteBuffer.allocate(HEADER_LENGTH + protobufClassNameLength + protbufPayloadLength);
+        ByteBuffer buffer = ByteBuffer.allocate(HEADER_LENGTH + protobufClassNameLength + protobufPayloadLength);
         buffer.putInt(SIGNATURE);
         buffer.putInt(protobufClassNameLength);
-        buffer.putInt(protbufPayloadLength);
+        buffer.putInt(protobufPayloadLength);
         buffer.put(encodedProtobufClassName);
-        buffer.put(protbufPayload);
+        buffer.put(protobufPayload);
         return buffer.array();
     }
 
     /**
-     * Get the size (in number of bytes) of a fully serialized protobut message, including all the header information.
+     * Get the size (in number of bytes) of a fully serialized protobuf message, including all the header information.
      * @param message the protobuf message
      * @return the size of a fully serialized message in bytes (including the header size)
      */
@@ -67,7 +67,7 @@ public final class ProtobufSerializer {
     /**
      * Check if the header started with a valid signature
      * @param header the message header
-     * @return true if the signature if the header is valid
+     * @return true if the signature of the header is valid
      */
     public static boolean hasValidHeaderSignature(byte[] header) {
         return ByteUtils.readInteger(header, 0) == SIGNATURE;
@@ -78,7 +78,7 @@ public final class ProtobufSerializer {
      * @param header the message header
      * @return the length of the protobuf class name
      */
-    public static int extractProtobufClassnameLength(byte[] header) {
+    public static int extractProtobufClassNameLength(byte[] header) {
         return ByteUtils.readInteger(header, Integer.BYTES);
     }
 
@@ -100,9 +100,9 @@ public final class ProtobufSerializer {
     public static Message deserialize(ByteBuffer protobufClassNameBuffer, ByteBuffer protobufPayloadBuffer) {
         final Method protobufParseMethod = getParseMethod(protobufClassNameBuffer);
         try {
-            return (Message) protobufParseMethod.invoke(null, (Object) protobufPayloadBuffer);
+            return (Message) protobufParseMethod.invoke(null, protobufPayloadBuffer);
         } catch (IllegalAccessException | InvocationTargetException e) {
-            throw new IllegalStateException("Unable to parse protobuf payload of " + CHARSET.decode(protobufClassNameBuffer).toString(), e);
+            throw new IllegalStateException("Unable to parse protobuf payload of " + CHARSET.decode(protobufClassNameBuffer), e);
         }
     }
 

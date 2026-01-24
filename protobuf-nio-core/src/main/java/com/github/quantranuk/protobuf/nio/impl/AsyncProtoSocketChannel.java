@@ -53,7 +53,6 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
     private boolean isInjectedWriteExecutor = false;
     private ExecutorService readExecutor;
     private ExecutorService writeExecutor;
-    private AsynchronousChannelGroup channelGroup;
 
     public AsyncProtoSocketChannel(SocketAddress socketAddress) {
         this.socketAddress = socketAddress;
@@ -77,7 +76,7 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         }
         if (socketChannel == null) {
             try {
-                channelGroup = AsynchronousChannelGroup.withThreadPool(readExecutor); // Use the read executor
+                AsynchronousChannelGroup channelGroup = AsynchronousChannelGroup.withThreadPool(readExecutor); // Use the read executor
                 socketChannel = AsynchronousSocketChannel.open(channelGroup);
             } catch (IOException e) {
                 throw new IllegalStateException("Unable to open socket channel", e);
@@ -91,14 +90,14 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
     public void connect() {
         try {
             socketChannel.connect(socketAddress).get();
-            LOGGER.debug("Connected to " + socketAddress);
+            LOGGER.debug("Connected to {}", socketAddress);
             connectionHandlers.forEach(handler -> handler.onConnected(socketAddress));
             reader.start();
         } catch (InterruptedException e) {
-            LOGGER.debug("Interrupted while connecting to "+ socketAddress, e);
+            LOGGER.debug("Interrupted while connecting to {}", socketAddress, e);
             Thread.currentThread().interrupt();
         }catch (ExecutionException e) {
-            LOGGER.error("An error has occurred while trying connect to " + socketAddress, e);
+            LOGGER.error("An error has occurred while trying connect to {}", socketAddress, e);
             disconnect();
         }
     }
@@ -118,10 +117,10 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
             try {
                 socketChannel.close();
             } catch (IOException e) {
-                LOGGER.error("Unable to close socket channel to " + socketAddress, e);
+                LOGGER.error("Unable to close socket channel to {}", socketAddress, e);
             }
         }
-        LOGGER.debug("Disconnected from " + socketAddress);
+        LOGGER.debug("Disconnected from {}", socketAddress);
         disconnectionHandlers.forEach(handler -> handler.onDisconnected(socketAddress));
         if (!isInjectedReadExecutor) {
             readExecutor.shutdown();
@@ -231,26 +230,26 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         }
     }
 
-    private class MessageReadCompletionHandler implements CompletionHandler<Long, Message> {
+    private class MessageReadCompletionHandler implements CompletionHandler<Integer, Message> {
 
         @Override
-        public void completed(Long readBytes, Message message) {
+        public void completed(Integer readBytes, Message message) {
             messageReceivedHandlers.forEach(handler -> handler.onMessageReceived(socketAddress, message));
         }
 
         @Override
         public void failed(Throwable exc, Message message) {
             if (!isShuttingDown) {
-                LOGGER.debug("Unable to read from " + socketAddress, exc);
+                LOGGER.debug("Unable to read from {}", socketAddress, exc);
                 disconnect();
             }
         }
     }
 
-    private class MessageWriteCompletionHandler implements CompletionHandler<Long, Message> {
+    private class MessageWriteCompletionHandler implements CompletionHandler<Integer, Message> {
 
         @Override
-        public void completed(Long sentBytes, Message message) {
+        public void completed(Integer sentBytes, Message message) {
             messageSentHandlers.forEach(handler -> handler.onMessageSent(socketAddress, message));
         }
 

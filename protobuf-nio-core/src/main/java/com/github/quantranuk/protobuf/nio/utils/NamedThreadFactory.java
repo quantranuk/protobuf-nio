@@ -1,5 +1,6 @@
 package com.github.quantranuk.protobuf.nio.utils;
 
+import jakarta.annotation.Nonnull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -7,14 +8,14 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * A simple non-deamon thread factory that print out uncaught exceptions
+ * A simple non-daemon thread factory that print out uncaught exceptions
  */
 public class NamedThreadFactory implements ThreadFactory {
 
     private static final int STACK_SIZE = 0;
     private static final AtomicInteger POOL_NUMBER = new AtomicInteger(1);
     private static final Logger LOGGER = LoggerFactory.getLogger("UncaughtExceptionHandler");
-    private static final Thread.UncaughtExceptionHandler UNCAUGHT_EXCEPTION_HANDLER = (t, e) -> LOGGER.error("Exception thrown from " + t.getName(), e);
+    private static final Thread.UncaughtExceptionHandler UNCAUGHT_EXCEPTION_HANDLER = (t, e) -> LOGGER.error("Exception thrown from {}", t.getName(), e);
 
     private final ThreadGroup group;
     private final AtomicInteger threadNumber = new AtomicInteger(1);
@@ -26,7 +27,7 @@ public class NamedThreadFactory implements ThreadFactory {
     }
 
     @Override
-    public Thread newThread(Runnable r) {
+    public Thread newThread(@Nonnull Runnable r) {
         Thread t = new Thread(group, r,namePrefix + threadNumber.getAndIncrement(), STACK_SIZE);
         if (t.isDaemon())
             t.setDaemon(false);

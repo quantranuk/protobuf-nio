@@ -15,10 +15,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
+class SocketChannelWriter {
 
     private final AsynchronousSocketChannel socketChannel;
-    private final CompletionHandler<Long, Message> messageWriteCompletionHandler;
+    private final CompletionHandler<Integer, Message> messageWriteCompletionHandler;
+    private final WriteCompletionHandler writeCompletionHandler;
     private final ExecutorService writeExecutor;
     private final Queue<Message> outboundMessageQueue;
     private final long writeTimeoutMillis;
@@ -29,10 +30,16 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
     private final AtomicBoolean isWritingInProgress;
     private final int maxMessageWriteQueueSize;
 
-    SocketChannelWriter(AsynchronousSocketChannel socketChannel, long writeTimeoutMillis, int writeBufferCapacity, int maxMessageWriteQueueSize, ExecutorService writeExecutor, CompletionHandler<Long, Message> messageWriteCompletionHandler) {
+    SocketChannelWriter(AsynchronousSocketChannel socketChannel,
+                        long writeTimeoutMillis,
+                        int writeBufferCapacity,
+                        int maxMessageWriteQueueSize,
+                        ExecutorService writeExecutor,
+                        CompletionHandler<Integer, Message> messageWriteCompletionHandler) {
         this.socketChannel = socketChannel;
         this.maxMessageWriteQueueSize = maxMessageWriteQueueSize;
         this.messageWriteCompletionHandler = messageWriteCompletionHandler;
+        this.writeCompletionHandler = new WriteCompletionHandler();
         this.writeExecutor = writeExecutor;
         this.outboundMessageQueue = new ArrayDeque<>();
         this.writeTimeoutMillis = writeTimeoutMillis;
@@ -89,7 +96,7 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
     private void writeNextBlock(List<Message> messages) {
         ByteBuffer nextBlock = writeBytesQueue.popMaximum(writeBufferCapacity);
         if (nextBlock == null) {
-            messages.forEach(message -> messageWriteCompletionHandler.completed((long) ProtobufSerializer.getSerializedSize(message), message));
+            messages.forEach(message -> messageWriteCompletionHandler.completed(ProtobufSerializer.getSerializedSize(message), message));
             checkMessageQueue();
             return;
         }
@@ -97,27 +104,29 @@ class SocketChannelWriter implements CompletionHandler<Integer, List<Message>> {
         writeBuffer.clear();
         writeBuffer.put(nextBlock);
         writeBuffer.flip();
-        socketChannel.write(writeBuffer, writeTimeoutMillis, TimeUnit.MILLISECONDS, messages, this);
+        socketChannel.write(writeBuffer, writeTimeoutMillis, TimeUnit.MILLISECONDS, messages, writeCompletionHandler);
     }
 
-    @Override
-    public void completed(Integer result, List<Message> messages) {
-        writeExecutor.execute(() -> {
-            int unwrittenBytes = writeBuffer.limit() - result;
-            if (unwrittenBytes > 0) {
-                writeBytesQueue.pushLast(writeBuffer.array(), result, unwrittenBytes);
-            }
-            writeNextBlock(messages);
-        });
+    private final class WriteCompletionHandler implements CompletionHandler<Integer, List<Message>> {
+
+        @Override
+        public void completed(Integer result, List<Message> messages) {
+            writeExecutor.execute(() -> {
+                int unwrittenBytes = writeBuffer.limit() - result;
+                if (unwrittenBytes > 0) {
+                    writeBytesQueue.pushLast(writeBuffer.array(), result, unwrittenBytes);
+                }
+                writeNextBlock(messages);
+            });
+        }
+
+        @Override
+        public void failed(Throwable exc, List<Message> messages) {
+            writeExecutor.execute(
+                    () -> messages.forEach(
+                            message -> messageWriteCompletionHandler.failed(exc, message)));
+        }
+
     }
-
-    @Override
-    public void failed(Throwable exc, List<Message> messages) {
-        writeExecutor.execute(
-                () -> messages.forEach(
-                        message -> messageWriteCompletionHandler.failed(exc, message)));
-    }
-
-
 
 }
