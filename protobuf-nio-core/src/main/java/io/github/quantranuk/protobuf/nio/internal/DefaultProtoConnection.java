@@ -47,7 +47,7 @@ final class DefaultProtoConnection implements ProtoConnection {
 
     @Override
     public SSLSession tlsSession() {
-        return null;
+        return connection.tlsSession();
     }
 
     @Override

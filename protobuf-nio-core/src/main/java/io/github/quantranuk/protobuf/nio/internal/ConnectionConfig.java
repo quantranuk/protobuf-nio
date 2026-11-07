@@ -1,6 +1,7 @@
 package io.github.quantranuk.protobuf.nio.internal;
 
 import io.github.quantranuk.protobuf.nio.OverflowPolicy;
+import io.github.quantranuk.protobuf.nio.TlsClientAuth;
 import com.google.protobuf.MessageLite;
 import com.google.protobuf.Parser;
 
@@ -14,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ThreadFactory;
+import javax.net.ssl.SSLContext;
 
 /**
  * Immutable settings of a {@link Connection}. Durations are stored in nanoseconds; 0 means "none" for the read timeout,
@@ -45,6 +47,9 @@ public final class ConnectionConfig {
     final Map<ByteBuffer, RawHandler> rawHandlers;
     final ClassLoader classLoader;
     final ThreadFactory threadFactory;   // null = a named virtual thread per reader and writer
+    final SSLContext sslContext;         // null = no TLS
+    final boolean tlsHostnameVerification;
+    final TlsClientAuth tlsClientAuth;
 
     private ConnectionConfig(Builder b) {
         handshakeTimeoutNanos = b.handshakeTimeout.toNanos();
@@ -65,6 +70,9 @@ public final class ConnectionConfig {
         rawHandlers = Map.copyOf(b.rawHandlers);
         classLoader = b.classLoader != null ? b.classLoader : defaultClassLoader();
         threadFactory = b.threadFactory;
+        sslContext = b.sslContext;
+        tlsHostnameVerification = b.tlsHostnameVerification;
+        tlsClientAuth = b.tlsClientAuth;
     }
 
     /** A raw handler registered for one message type; the handler is the public API's, passed back as is. */
@@ -100,6 +108,9 @@ public final class ConnectionConfig {
         private final Map<ByteBuffer, RawHandler> rawHandlers = new HashMap<>();
         private ClassLoader classLoader;
         private ThreadFactory threadFactory;
+        private SSLContext sslContext;
+        private boolean tlsHostnameVerification = true;
+        private TlsClientAuth tlsClientAuth = TlsClientAuth.NONE;
 
         private Builder() {
         }
@@ -248,6 +259,24 @@ public final class ConnectionConfig {
         /** {@code null} = virtual threads. Each connection uses two threads. */
         public Builder threadFactory(ThreadFactory factory) {
             threadFactory = factory;
+            return this;
+        }
+
+        /** {@code null} = no TLS. */
+        public Builder tls(SSLContext context) {
+            sslContext = context;
+            return this;
+        }
+
+        /** Client side, with TLS: check that the server's certificate matches the host name. Default true. */
+        public Builder tlsHostnameVerification(boolean enabled) {
+            tlsHostnameVerification = enabled;
+            return this;
+        }
+
+        /** Server side, with TLS: whether clients must present a certificate. Default {@link TlsClientAuth#NONE}. */
+        public Builder tlsClientAuth(TlsClientAuth mode) {
+            tlsClientAuth = Objects.requireNonNull(mode, "mode");
             return this;
         }
 

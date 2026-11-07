@@ -4,6 +4,7 @@ import io.github.quantranuk.protobuf.nio.internal.ConnectionConfig;
 import io.github.quantranuk.protobuf.nio.internal.DefaultProtoClient;
 import com.google.protobuf.MessageLite;
 
+import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -263,6 +264,26 @@ public interface ProtoClient extends AutoCloseable {
         /** Creates the reader and writer threads (two per connection). Default: virtual threads. */
         public Builder threadFactory(ThreadFactory factory) {
             config.threadFactory(Objects.requireNonNull(factory, "factory"));
+            return this;
+        }
+
+        /**
+         * Connects over TLS, with the protocols, ciphers and trust material of this context (its trust managers decide
+         * which server certificates are accepted; its key managers provide a client certificate if the server asks for
+         * one). The TLS handshake runs within {@code handshakeTimeout}; if it fails, {@code connect()} throws an
+         * {@link javax.net.ssl.SSLException}. Default: no TLS.
+         */
+        public Builder tls(SSLContext context) {
+            config.tls(Objects.requireNonNull(context, "context"));
+            return this;
+        }
+
+        /**
+         * With TLS, whether the server's certificate must match the host name given to {@link ProtoClient#builder}
+         * (as HTTPS clients check). Turn it off only for tests or when trust is pinned some other way. Default true.
+         */
+        public Builder tlsHostnameVerification(boolean enabled) {
+            config.tlsHostnameVerification(enabled);
             return this;
         }
 

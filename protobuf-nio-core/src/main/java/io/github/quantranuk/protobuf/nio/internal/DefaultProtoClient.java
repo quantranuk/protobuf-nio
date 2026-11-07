@@ -56,7 +56,7 @@ public final class DefaultProtoClient implements ProtoClient {
             throw new IllegalStateException(state.get() == CLOSED && connection == null
                     ? "The client was closed before connecting" : "connect() was already called");
         }
-        Connection c = new Connection(id, new Socket(), config, new Events());
+        Connection c = new Connection(id, new Socket(), target.getHostString(), config, new Events());
         connection = c;
         return c;
     }
@@ -146,7 +146,8 @@ public final class DefaultProtoClient implements ProtoClient {
 
     @Override
     public SSLSession tlsSession() {
-        return null;
+        Connection c = connection;
+        return c != null ? c.tlsSession() : null;
     }
 
     @Override

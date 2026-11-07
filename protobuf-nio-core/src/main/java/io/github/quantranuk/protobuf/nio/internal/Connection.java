@@ -37,6 +37,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
 
 /**
  * One protobuf-nio connection over a connected blocking {@link Socket}, client or server side.
@@ -89,7 +93,12 @@ public final class Connection {
     private static final ScopedValue<Connection> REPORTING = ScopedValue.newInstance();
 
     private final long id;
-    private final Socket socket;
+    private final Socket socket;   // the TCP socket: closing it stops both threads at once, also under TLS
+    private final String tlsHost;  // client side: the server's host name (SNI, hostname verification); null on the server
+    // What the reader and writer use: the TLS socket over `socket` once started with TLS, otherwise `socket` itself
+    private volatile Socket stream;
+    private final CountDownLatch tlsReady;   // TLS only: the reader's TLS handshake is over (or the connection closed)
+    private volatile SSLSession tlsSession;
     private final ConnectionConfig config;
     private final ConnectionListener listener;
     private final MessageTypes messageTypes;
@@ -125,6 +134,7 @@ public final class Connection {
     private int readEnd;
     private boolean growReadBuffer;
     private boolean handshaking = true;
+    private boolean tlsHandshaking;
     private long handshakeDeadlineNanos;
     private long lastReceivedNanos;
     private int soTimeoutMillis = -1;
@@ -160,8 +170,23 @@ public final class Connection {
      * @param listener events of this connection
      */
     public Connection(long id, Socket socket, ConnectionConfig config, ConnectionListener listener) {
+        this(id, socket, null, config, listener);
+    }
+
+    /**
+     * @param id       from {@link #nextId()}
+     * @param socket   a socket, connected before {@link #start()}; owned by this connection from now on
+     * @param tlsHost  with TLS: the server's host name on the client side (for SNI and hostname verification), or
+     *                 {@code null} on the server side; ignored without TLS
+     * @param config   settings
+     * @param listener events of this connection
+     */
+    public Connection(long id, Socket socket, String tlsHost, ConnectionConfig config, ConnectionListener listener) {
         this.id = id;
         this.socket = Objects.requireNonNull(socket, "socket");
+        this.stream = socket;
+        this.tlsHost = tlsHost;
+        this.tlsReady = config.sslContext != null ? new CountDownLatch(1) : null;
         this.config = Objects.requireNonNull(config, "config");
         this.listener = Objects.requireNonNull(listener, "listener");
         this.messageTypes = MessageTypes.forClassLoader(config.classLoader);
@@ -188,8 +213,9 @@ public final class Connection {
     }
 
     /**
-     * Applies the socket options and starts the reader and writer threads.
-     * @throws IOException if the connection was closed before starting, or a socket option can't be set; the
+     * Applies the socket options, layers TLS over the socket if configured (the TLS handshake itself runs on the reader
+     * thread), and starts the reader and writer threads.
+     * @throws IOException if the connection was closed before starting, or a socket option or TLS can't be set up; the
      *                     connection is then {@linkplain #abort aborted}
      */
     public void start() throws IOException {
@@ -198,6 +224,9 @@ public final class Connection {
                 throw new SocketException("Closed before the connection started");
             }
             applySocketOptions(socket, config.socketOptions);
+            if (config.sslContext != null) {
+                stream = layerTls();
+            }
         } catch (IOException | RuntimeException e) {
             abort(e);
             throw e;
@@ -212,8 +241,37 @@ public final class Connection {
         reader.start();
     }
 
+    private SSLSocket layerTls() throws IOException {
+        InetSocketAddress peer = remoteAddress();
+        boolean client = tlsHost != null;
+        // autoClose: closing the TLS socket closes the TCP socket. This class closes the TCP socket directly, though.
+        SSLSocket tls = (SSLSocket) config.sslContext.getSocketFactory()
+                .createSocket(socket, client ? tlsHost : peer.getHostString(), peer.getPort(), true);
+        tls.setUseClientMode(client);
+        SSLParameters parameters = tls.getSSLParameters();
+        if (client) {
+            if (config.tlsHostnameVerification) {
+                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+            }
+        } else {
+            switch (config.tlsClientAuth) {
+                case NEED -> parameters.setNeedClientAuth(true);
+                case WANT -> parameters.setWantClientAuth(true);
+                case NONE -> {
+                }
+            }
+        }
+        tls.setSSLParameters(parameters);
+        return tls;
+    }
+
     public long id() {
         return id;
+    }
+
+    /** The TLS session once the TLS handshake is over; {@code null} without TLS or before that. */
+    public SSLSession tlsSession() {
+        return tlsSession;
     }
 
     public Socket socket() {
@@ -544,6 +602,9 @@ public final class Connection {
                 LOG.debug("{}: error closing the socket", this, e);
             }
             socketClosed.countDown();
+            if (tlsReady != null) {
+                tlsReady.countDown();   // a writer still waiting for the TLS handshake gives up
+            }
             LockSupport.unpark(writer);
             wakeBlockedSenders();
         }
@@ -576,7 +637,10 @@ public final class Connection {
     private void readLoop() {
         boolean connected = false;
         try {
-            InputStream in = socket.getInputStream();
+            if (stream instanceof SSLSocket tls) {
+                tlsHandshake(tls);
+            }
+            InputStream in = stream.getInputStream();
             while (readEnd - readStart < Protocol.PREAMBLE_LENGTH) {
                 if (!fill(in, Protocol.PREAMBLE_LENGTH)) {
                     terminate(CLOSED_BY_PEER);
@@ -594,17 +658,41 @@ public final class Connection {
             notifyConnected();
             readFrames(in);
             terminate(CLOSED_BY_PEER);
+        } catch (SSLException e) {
+            // TLS handshake failure (untrusted certificate, wrong host, not TLS), or a TLS error later
+            terminate(new Termination(DisconnectReason.TLS_ERROR, e));
         } catch (ProtocolException e) {
             // Bad preamble, or bad frame after it
             terminate(new Termination(handshaking ? DisconnectReason.PROTOCOL_MISMATCH : DisconnectReason.PROTOCOL_ERROR, e));
         } catch (SocketTimeoutException e) {
-            // Raised by onReadTimeout (socket read timeouts are handled in fill): no preamble, or the read timeout
-            terminate(new Termination(handshaking ? DisconnectReason.PROTOCOL_MISMATCH : DisconnectReason.READ_TIMEOUT, e));
+            // No TLS handshake or preamble within the handshake timeout, or the read timeout. Socket read timeouts in
+            // fill() are handled there, and onReadTimeout raises this one.
+            DisconnectReason reason = tlsHandshaking ? DisconnectReason.TLS_ERROR
+                    : handshaking ? DisconnectReason.PROTOCOL_MISMATCH : DisconnectReason.READ_TIMEOUT;
+            terminate(new Termination(reason, e));
         } catch (Throwable e) {
             terminate(new Termination(DisconnectReason.IO_ERROR, e));
         } finally {
             finish(connected);
         }
+    }
+
+    /**
+     * Runs the TLS handshake within the handshake timeout, then lets the writer send the preamble. The writer waits:
+     * if it wrote first, the TLS socket would start the handshake on the writer thread, without a timeout.
+     */
+    private void tlsHandshake(SSLSocket tls) throws IOException {
+        tlsHandshaking = true;
+        armReadTimeout();
+        try {
+            tls.startHandshake();
+        } catch (SocketTimeoutException e) {
+            throw new SocketTimeoutException("TLS handshake not done within "
+                    + TimeUnit.NANOSECONDS.toMillis(config.handshakeTimeoutNanos) + " ms");
+        }
+        tlsSession = tls.getSession();
+        tlsHandshaking = false;
+        tlsReady.countDown();
     }
 
     /** Reads frames until the end of stream. */
@@ -796,7 +884,7 @@ public final class Connection {
         // Small differences don't matter (waking a little late or early is harmless), and skipping them avoids a
         // setSoTimeout call on every read
         if (millis != current && (millis == 0 || current <= 0 || Math.abs(millis - current) > current / 16 + 1)) {
-            socket.setSoTimeout(millis);
+            stream.setSoTimeout(millis);
             soTimeoutMillis = millis;
         }
     }
@@ -861,20 +949,27 @@ public final class Connection {
 
     private void writeLoop() {
         try {
-            OutputStream out = socket.getOutputStream();
+            if (tlsReady != null) {
+                awaitUninterruptibly(tlsReady);
+                if (state.get() == CLOSED) {
+                    return;
+                }
+            }
+            OutputStream out = stream.getOutputStream();
             timedWrite(out, Protocol.PREAMBLE, 0, Protocol.PREAMBLE.length);
             lastWrittenNanos = System.nanoTime();
             while (state.get() != CLOSED) {
                 if (carry != null || !queue.isEmpty()) {
                     writeBatch(out);
                 } else if (state.get() == CLOSING) {
-                    socket.shutdownOutput();   // flushed: send FIN, the reader waits for the peer's
+                    stream.shutdownOutput();   // flushed: send FIN (TLS: close_notify), the reader waits for the peer's
                     return;
                 } else {
                     awaitWork(out);
                 }
             }
         } catch (Throwable e) {
+            LOG.debug("{}: writer stopped by {}", this, e.toString());   // after closing, the reason recorded hides it
             terminate(new Termination(DisconnectReason.IO_ERROR, e));
             failInFlight(e);
         } finally {

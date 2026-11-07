@@ -2,7 +2,7 @@
 
 # protobuf-nio
 
-> **`master` is being rewritten for 2.0** (virtual threads, a new API, TLS). The new `ProtoClient` / `ProtoServer` API works but is still incomplete (no TLS yet). Apart from the wire format section, this README still describes 1.x, whose last version is tagged [`1.x-final`](https://github.com/quantranuk/protobuf-nio/tree/1.x-final). It will be rewritten when 2.0 is ready.
+> **`master` is being rewritten for 2.0** (virtual threads, a new API, TLS). The new `ProtoClient` / `ProtoServer` API is feature-complete but not released yet. Apart from the wire format and TLS sections, this README still describes 1.x, whose last version is tagged [`1.x-final`](https://github.com/quantranuk/protobuf-nio/tree/1.x-final). It will be rewritten when 2.0 is ready.
 
 A small Java library for sending and receiving [Protocol Buffers](https://protobuf.dev/) messages over TCP, built directly on Java NIO asynchronous sockets (`java.nio.channels.Asynchronous*`). It has no Netty or Mina dependency.
 
@@ -12,7 +12,7 @@ A small Java library for sending and receiving [Protocol Buffers](https://protob
 - **Fast:** about 2 million request/response round-trips per second on one connection (see [Benchmark](#benchmark)).
 - **Scalable:** one read thread and one write thread can serve thousands of connections.
 
-> **Limitations:** no SSL/TLS (see [below](#why-no-ssltls)). Both peers must be Java and have the same generated protobuf classes on their classpath (see [Wire format](#wire-format)).
+> **Limitations:** 1.x has no SSL/TLS; 2.0 adds it (see [TLS](#tls)). Both peers must be Java and have the same generated protobuf classes on their classpath (see [Wire format](#wire-format)).
 
 ## Requirements
 
@@ -251,9 +251,30 @@ Results depend on hardware, message size and network. Run the samples to measure
 
 Use the Maven Wrapper (`./mvnw`). Building requires JDK 25 or later. The library is compiled for Java 25.
 
-## Why no SSL/TLS?
+## TLS
 
-Java's [`SSLEngine`](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/javax/net/ssl/SSLEngine.html) has to be driven by hand alongside non-blocking I/O, through handshakes, wrapping, unwrapping and renegotiation. Adding it would mean a major redesign of the reader and writer. If you need encryption, run the connection through a TLS tunnel or proxy, such as stunnel, a service mesh sidecar, or an SSH tunnel.
+2.0 supports TLS through the JDK's `SSLSocket`. Pass an `SSLContext` to both builders: its key managers provide the certificate, its trust managers decide which peer certificates to accept.
+
+```java
+ProtoServer server = ProtoServer.builder(8443)
+        .tls(serverContext)                     // e.g. key material from a PKCS12 keystore
+        .tlsClientAuth(TlsClientAuth.NEED)      // optional: require client certificates (default NONE)
+        .listener(listener)
+        .build();
+
+ProtoClient client = ProtoClient.builder("server.example.com", 8443)
+        .tls(clientContext)                     // trusts the server's certificate
+        .build();                               // hostname verification is on by default
+client.connect();                               // throws an SSLException if the TLS handshake fails
+SSLSession session = client.tlsSession();
+```
+
+- The TLS handshake runs on each connection's own thread, within `handshakeTimeout`, before the protocol preamble. If it fails, `connect()` throws and no listener method is called on either side; the reason is `TLS_ERROR`.
+- The client checks that the server's certificate matches the host name it was given, as HTTPS clients do. `tlsHostnameVerification(false)` turns that off, for tests only.
+- Both sides must use TLS: a TLS client and a plain server (or the reverse) fail to connect.
+- `tlsSession()` on a client or a server connection gives the negotiated protocol, cipher suite and peer certificates.
+
+Throughput with TLS (TLS 1.3, loopback, small messages, one connection, one way) is about 6–8 million messages per second, against 9–11 million without.
 
 ## License
 

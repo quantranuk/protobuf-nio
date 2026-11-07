@@ -13,6 +13,7 @@ import java.util.Collection;
 import java.util.Objects;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.Predicate;
+import javax.net.ssl.SSLContext;
 
 /**
  * Accepts protobuf-nio connections. Each accepted connection gets its own reader and writer virtual threads, so
@@ -229,6 +230,23 @@ public interface ProtoServer extends AutoCloseable {
         /** Creates the acceptor thread and each connection's reader and writer threads. Default: virtual threads. */
         public Builder threadFactory(ThreadFactory factory) {
             config.threadFactory(Objects.requireNonNull(factory, "factory"));
+            return this;
+        }
+
+        /**
+         * Accepts TLS connections only, with the certificate of this context's key managers (and its trust managers
+         * for client certificates, see {@link #tlsClientAuth}). Each connection's TLS handshake runs on its own thread
+         * within {@code handshakeTimeout}; a connection whose handshake fails is never reported to the listener.
+         * Default: no TLS.
+         */
+        public Builder tls(SSLContext context) {
+            config.tls(Objects.requireNonNull(context, "context"));
+            return this;
+        }
+
+        /** With TLS, whether clients must present a trusted certificate. Default {@link TlsClientAuth#NONE}. */
+        public Builder tlsClientAuth(TlsClientAuth mode) {
+            config.tlsClientAuth(mode);
             return this;
         }
 
