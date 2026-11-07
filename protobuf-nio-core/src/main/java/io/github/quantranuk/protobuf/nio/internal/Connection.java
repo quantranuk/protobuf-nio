@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -95,8 +96,8 @@ public final class Connection {
     private final CountDownLatch socketClosed = new CountDownLatch(1);
     private final CountDownLatch writerDone = new CountDownLatch(1);
 
-    // Send queue: any thread adds, the writer removes
-    private final ConcurrentLinkedQueue<MessageLite> queue = new ConcurrentLinkedQueue<>();
+    // Send queue of MessageLite or EncodedFrame: any thread adds, the writer removes
+    private final ConcurrentLinkedQueue<Object> queue = new ConcurrentLinkedQueue<>();
     private final AtomicInteger pendingMessages = new AtomicInteger();
     private final AtomicLong pendingBytes = new AtomicLong();
     private volatile boolean writerParked;
@@ -124,7 +125,7 @@ public final class Connection {
     // Writer thread only
     private byte[] writeBuffer;
     private boolean growWriteBuffer;
-    private final ArrayList<MessageLite> inFlight = new ArrayList<>();
+    private final ArrayList<Object> inFlight = new ArrayList<>();
     private long inFlightBytes;
     private long lastWrittenNanos;
     private long lastBatchNanos;
@@ -135,7 +136,17 @@ public final class Connection {
      * @param listener events of this connection
      */
     public Connection(Socket socket, ConnectionConfig config, ConnectionListener listener) {
-        this.id = IDS.incrementAndGet();
+        this(nextId(), socket, config, listener);
+    }
+
+    /**
+     * @param id       from {@link #nextId()}
+     * @param socket   a socket, connected before {@link #start()}; owned by this connection from now on
+     * @param config   settings
+     * @param listener events of this connection
+     */
+    public Connection(long id, Socket socket, ConnectionConfig config, ConnectionListener listener) {
+        this.id = id;
         this.socket = Objects.requireNonNull(socket, "socket");
         this.config = Objects.requireNonNull(config, "config");
         this.listener = Objects.requireNonNull(listener, "listener");
@@ -144,17 +155,37 @@ public final class Connection {
         this.writer = newThread(this::writeLoop, "writer");
     }
 
+    /** Next value of the id sequence shared by every client and connection in the JVM. */
+    public static long nextId() {
+        return IDS.incrementAndGet();
+    }
+
+    /**
+     * Applies the options the socket supports (a server's options may include server-socket-only ones) and ignores the
+     * others.
+     */
+    public static void applySocketOptions(Socket socket, Map<SocketOption<?>, Object> options) throws IOException {
+        Set<SocketOption<?>> supported = socket.supportedOptions();
+        for (Map.Entry<SocketOption<?>, Object> option : options.entrySet()) {
+            if (supported.contains(option.getKey())) {
+                setOption(socket, option.getKey(), option.getValue());
+            }
+        }
+    }
+
     /**
      * Applies the socket options and starts the reader and writer threads.
-     * @throws IOException if a socket option can't be set; the socket is then closed
+     * @throws IOException if the connection was closed before starting, or a socket option can't be set; the
+     *                     connection is then {@linkplain #abort aborted}
      */
     public void start() throws IOException {
         try {
-            for (Map.Entry<SocketOption<?>, Object> option : config.socketOptions.entrySet()) {
-                setOption(option.getKey(), option.getValue());
+            if (state.get() == CLOSED) {
+                throw new SocketException("Closed before the connection started");
             }
+            applySocketOptions(socket, config.socketOptions);
         } catch (IOException | RuntimeException e) {
-            terminate(new Termination(DisconnectReason.IO_ERROR, e));
+            abort(e);
             throw e;
         }
         long now = System.nanoTime();
@@ -169,6 +200,10 @@ public final class Connection {
 
     public long id() {
         return id;
+    }
+
+    public Socket socket() {
+        return socket;
     }
 
     public InetSocketAddress remoteAddress() {
@@ -222,14 +257,22 @@ public final class Connection {
      */
     public boolean send(MessageLite message) {
         Objects.requireNonNull(message, "message");
+        return enqueue(message, ProtobufSerializer.getSerializedSize(message));
+    }
+
+    /** Same as {@link #send(MessageLite)}, for a message encoded once for several connections. */
+    public boolean send(EncodedFrame frame) {
+        return enqueue(frame, frame.frame().length);
+    }
+
+    private boolean enqueue(Object item, int size) {
         int s = state.get();
         if (s != OPEN && s != HANDSHAKING) {
             return false;
         }
-        int size = ProtobufSerializer.getSerializedSize(message);
         pendingMessages.incrementAndGet();
         pendingBytes.addAndGet(size);
-        queue.offer(message);
+        queue.offer(item);
         if (writerParked) {
             LockSupport.unpark(writer);
         }
@@ -269,6 +312,19 @@ public final class Connection {
         if (!awaitUntil(done, closeDeadlineNanos)) {
             terminate(CLOSED_LOCALLY);
         }
+    }
+
+    /**
+     * Closes a connection whose {@link #start()} was never called or failed: the handshake fails, queued messages are
+     * dropped without listener calls, and {@link #closedFuture()} completes. Idempotent.
+     */
+    public void abort(Throwable cause) {
+        terminate(new Termination(DisconnectReason.IO_ERROR, cause));
+        Termination t = termination.get();
+        handshake.completeExceptionally(handshakeFailure(t));
+        Watchdog.INSTANCE.unregister(this);
+        failQueued();
+        closed.complete(t.reason());
     }
 
     /** Blocks until closed and {@code onDisconnected} has returned. */
@@ -598,9 +654,9 @@ public final class Connection {
     private void writeBatch(OutputStream out) throws IOException {
         byte[] buffer = writeBuffer != null ? writeBuffer : new byte[Math.min(INITIAL_BUFFER_SIZE, config.writeBufferSize)];
         int length = 0;
-        MessageLite message;
-        while ((message = queue.peek()) != null) {
-            int size = ProtobufSerializer.getSerializedSize(message);
+        Object item;
+        while ((item = queue.peek()) != null) {
+            int size = sizeOf(item);
             if (length + size > buffer.length) {
                 if (length > 0) {
                     growWriteBuffer = buffer.length < config.writeBufferSize;
@@ -610,19 +666,24 @@ public final class Connection {
                 buffer = new byte[size > config.writeBufferSize ? size : Math.max(size, nextWriteBufferSize(buffer.length))];
             }
             queue.poll();
-            try {
-                ProtobufSerializer.serializeInto(message, ByteBuffer.wrap(buffer, length, size));
-            } catch (RuntimeException e) {
-                pendingMessages.decrementAndGet();
-                pendingBytes.addAndGet(-size);
-                if (handshakeSucceeded()) {
-                    notifySendFailure(message, new SendException(SendException.Reason.WRITE_FAILED, e));
+            if (item instanceof EncodedFrame frame) {
+                System.arraycopy(frame.frame(), 0, buffer, length, size);
+            } else {
+                MessageLite message = (MessageLite) item;
+                try {
+                    ProtobufSerializer.serializeInto(message, ByteBuffer.wrap(buffer, length, size));
+                } catch (RuntimeException e) {
+                    pendingMessages.decrementAndGet();
+                    pendingBytes.addAndGet(-size);
+                    if (handshakeSucceeded()) {
+                        notifySendFailure(message, new SendException(SendException.Reason.WRITE_FAILED, e));
+                    }
+                    continue;
                 }
-                continue;
             }
             length += size;
             inFlightBytes += size;
-            inFlight.add(message);
+            inFlight.add(item);
         }
         if (length > 0) {
             timedWrite(out, buffer, length);
@@ -703,9 +764,9 @@ public final class Connection {
         SendException failure = new SendException(SendException.Reason.WRITE_FAILED, cause);
         pendingMessages.addAndGet(-inFlight.size());
         pendingBytes.addAndGet(-inFlightBytes);
-        for (MessageLite message : inFlight) {
-            if (report) {
-                notifySendFailure(message, failure);
+        if (report) {
+            for (Object item : inFlight) {
+                notifySendFailure(messageOf(item), failure);
             }
         }
         inFlight.clear();
@@ -714,18 +775,26 @@ public final class Connection {
 
     /** Fails everything queued with CLOSED. Runs on the writer, then on the reader after the writer has finished. */
     private void failQueued() {
-        MessageLite message = queue.poll();
-        if (message == null) {
+        Object item = queue.poll();
+        if (item == null) {
             return;
         }
         boolean report = handshakeSucceeded();
         do {
             pendingMessages.decrementAndGet();
-            pendingBytes.addAndGet(-ProtobufSerializer.getSerializedSize(message));
+            pendingBytes.addAndGet(-sizeOf(item));
             if (report) {
-                notifySendFailure(message, CLOSED_FAILURE);
+                notifySendFailure(messageOf(item), CLOSED_FAILURE);
             }
-        } while ((message = queue.poll()) != null);
+        } while ((item = queue.poll()) != null);
+    }
+
+    private static int sizeOf(Object item) {
+        return item instanceof EncodedFrame frame ? frame.frame().length : ProtobufSerializer.getSerializedSize((MessageLite) item);
+    }
+
+    private static MessageLite messageOf(Object item) {
+        return item instanceof EncodedFrame frame ? frame.message() : (MessageLite) item;
     }
 
     /** Waits for the handshake outcome: send failures are reported only for connections that were reported connected. */
@@ -786,7 +855,7 @@ public final class Connection {
     }
 
     @SuppressWarnings("unchecked")
-    private <T> void setOption(SocketOption<T> option, Object value) throws IOException {
+    private static <T> void setOption(Socket socket, SocketOption<T> option, Object value) throws IOException {
         socket.setOption(option, (T) value);
     }
 
