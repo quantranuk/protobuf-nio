@@ -2,7 +2,7 @@
 
 # protobuf-nio
 
-> **`master` is being rewritten for 2.0** (virtual threads, a new API, TLS). The new `ProtoClient` / `ProtoServer` API works but is still incomplete (no TLS, raw handlers or type allowlist yet). Apart from the wire format section, this README still describes 1.x, whose last version is tagged [`1.x-final`](https://github.com/quantranuk/protobuf-nio/tree/1.x-final). It will be rewritten when 2.0 is ready.
+> **`master` is being rewritten for 2.0** (virtual threads, a new API, TLS). The new `ProtoClient` / `ProtoServer` API works but is still incomplete (no TLS or raw handlers yet). Apart from the wire format section, this README still describes 1.x, whose last version is tagged [`1.x-final`](https://github.com/quantranuk/protobuf-nio/tree/1.x-final). It will be rewritten when 2.0 is ready.
 
 A small Java library for sending and receiving [Protocol Buffers](https://protobuf.dev/) messages over TCP, built directly on Java NIO asynchronous sockets (`java.nio.channels.Asynchronous*`). It has no Netty or Mina dependency.
 
@@ -216,6 +216,8 @@ The receiver uses the class name to find the generated class and its parser, so:
 - peers must be Java: other languages can implement the format, but they must send Java class names.
 
 The receiver only instantiates classes that implement `com.google.protobuf.MessageLite`. Any other class name is rejected without initializing the class.
+
+Still, by default a peer can make the receiver load any protobuf class on its classpath. When the peer isn't trusted, list the types you expect with `allowedMessageTypes(...)` on the 2.0 `ProtoClient` or `ProtoServer` builder: a message of any other type then disconnects the peer with `PROTOCOL_ERROR`, and its class name is checked against the list before any class is loaded.
 
 ## Dependency injection
 

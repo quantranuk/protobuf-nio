@@ -230,6 +230,18 @@ public interface ProtoClient extends AutoCloseable {
             return this;
         }
 
+        /**
+         * Accepts only these message types from the peer, which is disconnected with
+         * {@link DisconnectReason#PROTOCOL_ERROR} if it sends any other; the class of a disallowed type is never loaded.
+         * Use it when the peer isn't trusted. Replaces the previous list. Default: any protobuf class on the class path.
+         * @throws IllegalArgumentException if no type is given, or a type isn't a generated protobuf message class
+         */
+        @SafeVarargs
+        public final Builder allowedMessageTypes(Class<? extends MessageLite>... types) {
+            config.allowedMessageTypes(types);
+            return this;
+        }
+
         /** Loads received message classes. Default: the thread's context class loader when {@link #build()} runs. */
         public Builder classLoader(ClassLoader loader) {
             config.classLoader(Objects.requireNonNull(loader, "loader"));

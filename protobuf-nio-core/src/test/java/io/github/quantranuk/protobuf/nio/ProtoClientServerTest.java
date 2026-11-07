@@ -519,6 +519,27 @@ public class ProtoClientServerTest {
     }
 
     @Test
+    public void serverAllowlistDisconnectsAClientSendingAnotherType() throws Exception {
+        BlockingQueue<DisconnectReason> serverReasons = new LinkedBlockingQueue<>();
+        BlockingQueue<MessageLite> received = new LinkedBlockingQueue<>();
+        ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
+                .allowedMessageTypes(HeartBeatRequest.class)
+                .listener(ProtoServerListener.builder()
+                        .onOtherMessage((connection, message) -> received.add(message))
+                        .onDisconnected((connection, reason, cause) -> serverReasons.add(reason))
+                        .build()));
+        ProtoClient client = client(server, ProtoClientListener.builder());
+        client.connect();
+        client.send(request(1));
+        assertEquals(request(1), received.poll(5, TimeUnit.SECONDS));
+        client.send(HeartBeatResponse.newBuilder().setRequestTimeMillis(2).build());
+        assertEquals(DisconnectReason.PROTOCOL_ERROR, serverReasons.poll(5, TimeUnit.SECONDS));
+        assertEquals(DisconnectReason.CLOSED_BY_PEER, client.awaitClosed());
+        assertTrue(received.isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).allowedMessageTypes());
+    }
+
+    @Test
     public void clientBuilderIsReusable() throws Exception {
         ProtoServer server = startServer(ProtoServerListener.builder());
         ProtoClient.Builder builder = ProtoClient.builder(server.localAddress());

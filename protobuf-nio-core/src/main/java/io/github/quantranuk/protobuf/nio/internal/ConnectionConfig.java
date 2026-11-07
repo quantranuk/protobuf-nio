@@ -1,11 +1,15 @@
 package io.github.quantranuk.protobuf.nio.internal;
 
 import io.github.quantranuk.protobuf.nio.OverflowPolicy;
+import com.google.protobuf.MessageLite;
+import com.google.protobuf.Parser;
 
 import java.net.SocketOption;
+import java.nio.ByteBuffer;
 import java.net.StandardSocketOptions;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -35,6 +39,8 @@ public final class ConnectionConfig {
     final OverflowPolicy overflowPolicy;
     final long sendTimeoutNanos;
     final Map<SocketOption<?>, Object> socketOptions;
+    // Allowed message types: read-only buffer of the ISO-8859-1 class name -> parser; null = any protobuf class
+    final Map<ByteBuffer, Parser<? extends MessageLite>> allowedTypes;
     final ClassLoader classLoader;
     final ThreadFactory threadFactory;   // null = a named virtual thread per reader and writer
 
@@ -53,6 +59,7 @@ public final class ConnectionConfig {
         overflowPolicy = b.overflowPolicy;
         sendTimeoutNanos = b.sendTimeout.toNanos();
         socketOptions = Collections.unmodifiableMap(new LinkedHashMap<>(b.socketOptions));
+        allowedTypes = b.allowedTypes;
         classLoader = b.classLoader != null ? b.classLoader : defaultClassLoader();
         threadFactory = b.threadFactory;
     }
@@ -82,6 +89,7 @@ public final class ConnectionConfig {
         private OverflowPolicy overflowPolicy = OverflowPolicy.BLOCK;
         private Duration sendTimeout = Duration.ofSeconds(10);
         private final Map<SocketOption<?>, Object> socketOptions = new LinkedHashMap<>(Map.of(StandardSocketOptions.TCP_NODELAY, true));
+        private Map<ByteBuffer, Parser<? extends MessageLite>> allowedTypes;
         private ClassLoader classLoader;
         private ThreadFactory threadFactory;
 
@@ -172,6 +180,32 @@ public final class ConnectionConfig {
             Objects.requireNonNull(option, "option");
             Objects.requireNonNull(value, "value");
             socketOptions.put(option, value);
+            return this;
+        }
+
+        /**
+         * Restricts the received message types to these: any other type disconnects the peer with
+         * {@code PROTOCOL_ERROR}, and its class is never loaded. Replaces the previous list. Default: any protobuf class.
+         * @throws IllegalArgumentException if empty, or if a type isn't a generated message class
+         */
+        @SafeVarargs
+        public final Builder allowedMessageTypes(Class<? extends MessageLite>... types) {
+            Objects.requireNonNull(types, "types");
+            if (types.length == 0) {
+                throw new IllegalArgumentException("allowedMessageTypes needs at least one type");
+            }
+            Map<ByteBuffer, Parser<? extends MessageLite>> allowed = new HashMap<>();
+            for (Class<? extends MessageLite> type : types) {
+                Objects.requireNonNull(type, "type");
+                Parser<? extends MessageLite> parser;
+                try {
+                    parser = MessageTypes.parserOf(type);
+                } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+                    throw new IllegalArgumentException("Not a generated protobuf message class: " + type.getName(), e);
+                }
+                allowed.put(ByteBuffer.wrap(type.getName().getBytes(ProtobufSerializer.CHARSET)).asReadOnlyBuffer(), parser);
+            }
+            allowedTypes = Map.copyOf(allowed);
             return this;
         }
 

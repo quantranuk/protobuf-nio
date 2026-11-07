@@ -653,6 +653,27 @@ public final class Connection {
 
     // Streams usually carry few message types, and comparing a few names is cheaper than hashing the name on every message
     private Parser<?> parser(byte[] buffer, int offset, int length) throws ProtocolException {
+        Parser<?> parser = cachedParser(buffer, offset, length);
+        if (parser != null) {
+            return parser;
+        }
+        parser = config.allowedTypes == null ? messageTypes.parser(buffer, offset, length) : allowedParser(buffer, offset, length);
+        cachedNames[nextCacheSlot] = Arrays.copyOfRange(buffer, offset, offset + length);
+        cachedParsers[nextCacheSlot] = parser;
+        nextCacheSlot = (nextCacheSlot + 1) % PARSER_CACHE_SIZE;
+        return parser;
+    }
+
+    /** Looks the name up in the allowlist only, so a disallowed class is never loaded. */
+    private Parser<?> allowedParser(byte[] buffer, int offset, int length) throws ProtocolException {
+        Parser<?> parser = config.allowedTypes.get(ByteBuffer.wrap(buffer, offset, length));
+        if (parser == null) {
+            throw new ProtocolException("Message type not allowed: " + new String(buffer, offset, length, ProtobufSerializer.CHARSET));
+        }
+        return parser;
+    }
+
+    private Parser<?> cachedParser(byte[] buffer, int offset, int length) {
         for (int i = 0; i < PARSER_CACHE_SIZE; i++) {
             byte[] name = cachedNames[i];
             if (name == null) {
@@ -662,11 +683,7 @@ public final class Connection {
                 return cachedParsers[i];
             }
         }
-        Parser<?> parser = messageTypes.parser(buffer, offset, length);
-        cachedNames[nextCacheSlot] = Arrays.copyOfRange(buffer, offset, offset + length);
-        cachedParsers[nextCacheSlot] = parser;
-        nextCacheSlot = (nextCacheSlot + 1) % PARSER_CACHE_SIZE;
-        return parser;
+        return null;
     }
 
     /**

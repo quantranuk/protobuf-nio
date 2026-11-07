@@ -291,6 +291,49 @@ public class ConnectionTest {
     }
 
     @Test
+    public void allowlistAcceptsListedTypesAndDisconnectsOnOthers() throws Exception {
+        RawPeer peer = rawPeer(config().allowedMessageTypes(HeartBeatRequest.class));
+        peer.out.write(Protocol.PREAMBLE);
+        peer.out.write(ProtobufSerializer.serialize(request(1)));
+        peer.out.write(ProtobufSerializer.serialize(HeartBeatResponse.newBuilder().setRequestTimeMillis(2).build()));
+        assertEquals(request(1), peer.events.messages.poll(5, TimeUnit.SECONDS));
+        Disconnect disconnect = peer.events.disconnects.poll(5, TimeUnit.SECONDS);
+        assertNotNull(disconnect);
+        assertEquals(DisconnectReason.PROTOCOL_ERROR, disconnect.reason);
+        assertInstanceOf(ProtocolException.class, disconnect.cause);
+        assertEquals("Message type not allowed: " + HeartBeatResponse.class.getName(), disconnect.cause.getMessage());
+        assertTrue(peer.events.messages.isEmpty());
+        assertClosedByPeer(peer.socket);
+    }
+
+    @Test
+    public void allowlistNeverLoadsADisallowedClass() throws Exception {
+        List<String> requested = new CopyOnWriteArrayList<>();
+        ClassLoader recording = new ClassLoader(getClass().getClassLoader()) {
+            @Override
+            protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                requested.add(name);
+                return super.loadClass(name, resolve);
+            }
+        };
+        RawPeer peer = rawPeer(config().classLoader(recording).allowedMessageTypes(HeartBeatRequest.class));
+        peer.out.write(Protocol.PREAMBLE);
+        peer.out.write(frame(String.class.getName().getBytes(StandardCharsets.ISO_8859_1), new byte[0]));
+        Disconnect disconnect = peer.events.disconnects.poll(5, TimeUnit.SECONDS);
+        assertNotNull(disconnect);
+        assertEquals(DisconnectReason.PROTOCOL_ERROR, disconnect.reason);
+        assertEquals("Message type not allowed: java.lang.String", disconnect.cause.getMessage());
+        assertTrue(requested.isEmpty(), "Class loader asked for " + requested);
+    }
+
+    @Test
+    public void allowlistRejectsInvalidTypes() {
+        assertThrows(IllegalArgumentException.class, () -> config().allowedMessageTypes());
+        assertThrows(IllegalArgumentException.class, () -> config().allowedMessageTypes(MessageLite.class));
+        assertThrows(NullPointerException.class, () -> config().allowedMessageTypes(HeartBeatRequest.class, null));
+    }
+
+    @Test
     public void heartbeatFramesNeverReachTheListener() throws Exception {
         RawPeer peer = rawPeer(config());
         peer.out.write(Protocol.PREAMBLE);

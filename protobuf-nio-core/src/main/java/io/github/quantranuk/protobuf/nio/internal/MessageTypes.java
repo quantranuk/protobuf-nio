@@ -5,7 +5,6 @@ import com.google.protobuf.Parser;
 
 import java.net.ProtocolException;
 import java.lang.ref.WeakReference;
-import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.Objects;
@@ -84,10 +83,15 @@ final class MessageTypes {
             throw new ProtocolException("Not a protobuf message class: " + className);
         }
         try {
-            MessageLite defaultInstance = (MessageLite) type.getMethod("getDefaultInstance").invoke(null);
-            return defaultInstance.getParserForType();
-        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException | RuntimeException | LinkageError e) {
+            return parserOf(type);
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
             throw protocolException("Unable to get the parser of " + className, e);
         }
+    }
+
+    /** The parser of a generated protobuf message class, through its static {@code getDefaultInstance()}. */
+    static Parser<? extends MessageLite> parserOf(Class<?> type) throws ReflectiveOperationException {
+        MessageLite defaultInstance = (MessageLite) type.getMethod("getDefaultInstance").invoke(null);
+        return defaultInstance.getParserForType();
     }
 }
