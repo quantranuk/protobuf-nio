@@ -1,6 +1,5 @@
 package io.github.quantranuk.protobuf.nio;
 
-import io.github.quantranuk.protobuf.nio.internal.ConnectionFailure;
 import io.github.quantranuk.protobuf.nio.internal.ProtobufSerializer;
 import io.github.quantranuk.protobuf.nio.internal.Protocol;
 import io.github.quantranuk.protobuf.nio.proto.TestHeartBeat.HeartBeatRequest;
@@ -9,6 +8,7 @@ import com.google.protobuf.MessageLite;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.net.ProtocolException;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetAddress;
@@ -224,8 +224,8 @@ public class ProtoClientServerTest {
                 }
             });
             ProtoClient client = track(ProtoClient.builder(new InetSocketAddress(LOOPBACK, other.getLocalPort())).build());
-            ConnectionFailure failure = assertThrows(ConnectionFailure.class, client::connect);
-            assertEquals(DisconnectReason.PROTOCOL_MISMATCH, failure.reason());
+            assertThrows(ProtocolException.class, client::connect);
+            assertEquals(DisconnectReason.PROTOCOL_MISMATCH, client.awaitClosed());
         }
     }
 

@@ -7,6 +7,7 @@ import com.google.protobuf.Parser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.ProtocolException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -360,7 +361,7 @@ public final class Connection {
     /** Called periodically by the watchdog. */
     void checkDeadlines(long now) {
         if (writing && config.writeTimeoutNanos > 0 && now - writeStartedNanos > config.writeTimeoutNanos) {
-            terminate(new Termination(DisconnectReason.WRITE_TIMEOUT, new ConnectionFailure(DisconnectReason.WRITE_TIMEOUT,
+            terminate(new Termination(DisconnectReason.WRITE_TIMEOUT, new SocketTimeoutException(
                     "A write blocked for more than " + TimeUnit.NANOSECONDS.toMillis(config.writeTimeoutNanos) + " ms")));
         }
         if (closeDeadlineArmed && now - closeDeadlineNanos >= 0) {
@@ -402,8 +403,12 @@ public final class Connection {
             notifyConnected();
             readFrames(in);
             terminate(CLOSED_BY_PEER);
-        } catch (ConnectionFailure e) {
-            terminate(new Termination(e.reason(), e));
+        } catch (ProtocolException e) {
+            // Bad preamble, or bad frame after it
+            terminate(new Termination(handshaking ? DisconnectReason.PROTOCOL_MISMATCH : DisconnectReason.PROTOCOL_ERROR, e));
+        } catch (SocketTimeoutException e) {
+            // Raised by onReadTimeout (socket read timeouts are handled in fill): no preamble, or the read timeout
+            terminate(new Termination(handshaking ? DisconnectReason.PROTOCOL_MISMATCH : DisconnectReason.READ_TIMEOUT, e));
         } catch (Throwable e) {
             terminate(new Termination(DisconnectReason.IO_ERROR, e));
         } finally {
@@ -427,17 +432,17 @@ public final class Connection {
             int nameLength = (int) INT.get(buffer, position + Integer.BYTES);
             int payloadLength = (int) INT.get(buffer, position + 2 * Integer.BYTES);
             if (signature != ProtobufSerializer.SIGNATURE) {
-                throw new ConnectionFailure(DisconnectReason.PROTOCOL_ERROR, String.format("Bad frame signature 0x%08X", signature));
+                throw new ProtocolException(String.format("Bad frame signature 0x%08X", signature));
             }
             if (nameLength == 0 && payloadLength == 0) {
                 readStart += HEADER_LENGTH;   // heartbeat
                 continue;
             }
             if (nameLength < 1 || nameLength > Protocol.MAX_CLASS_NAME_LENGTH) {
-                throw new ConnectionFailure(DisconnectReason.PROTOCOL_ERROR, "Class name length out of range: " + nameLength);
+                throw new ProtocolException("Class name length out of range: " + nameLength);
             }
             if (payloadLength < 0 || payloadLength > config.maxMessageSize) {
-                throw new ConnectionFailure(DisconnectReason.PROTOCOL_ERROR,
+                throw new ProtocolException(
                         "Payload length out of range: " + payloadLength + " (maxMessageSize " + config.maxMessageSize + ")");
             }
             int frameLength = HEADER_LENGTH + nameLength + payloadLength;
@@ -453,19 +458,19 @@ public final class Connection {
         }
     }
 
-    private MessageLite parse(byte[] buffer, int nameOffset, int nameLength, int payloadLength) throws ConnectionFailure {
+    private MessageLite parse(byte[] buffer, int nameOffset, int nameLength, int payloadLength) throws ProtocolException {
         Parser<?> parser = parser(buffer, nameOffset, nameLength);
         try {
             // Not aliased: the message never references the read buffer, which gets reused
             return (MessageLite) parser.parseFrom(buffer, nameOffset + nameLength, payloadLength);
         } catch (IOException | RuntimeException e) {
-            throw new ConnectionFailure(DisconnectReason.PROTOCOL_ERROR,
+            throw MessageTypes.protocolException(
                     "Unable to parse a " + new String(buffer, nameOffset, nameLength, ProtobufSerializer.CHARSET), e);
         }
     }
 
     // Streams usually carry few message types, and comparing a few names is cheaper than hashing the name on every message
-    private Parser<?> parser(byte[] buffer, int offset, int length) throws ConnectionFailure {
+    private Parser<?> parser(byte[] buffer, int offset, int length) throws ProtocolException {
         for (int i = 0; i < PARSER_CACHE_SIZE; i++) {
             byte[] name = cachedNames[i];
             if (name == null) {
@@ -570,18 +575,18 @@ public final class Connection {
         }
     }
 
-    private void onReadTimeout() throws ConnectionFailure {
+    private void onReadTimeout() throws SocketTimeoutException {
         long now = System.nanoTime();
         if (handshaking) {
             if (now - handshakeDeadlineNanos >= 0) {
-                throw new ConnectionFailure(DisconnectReason.PROTOCOL_MISMATCH, "No protocol preamble received within "
+                throw new SocketTimeoutException("No protocol preamble received within "
                         + TimeUnit.NANOSECONDS.toMillis(config.handshakeTimeoutNanos) + " ms");
             }
             return;
         }
         long idle = now - lastReceivedNanos;
         if (config.readTimeoutNanos > 0 && idle >= config.readTimeoutNanos) {
-            throw new ConnectionFailure(DisconnectReason.READ_TIMEOUT,
+            throw new SocketTimeoutException(
                     "Nothing received for " + TimeUnit.NANOSECONDS.toMillis(config.readTimeoutNanos) + " ms");
         }
         if (readBufferShrinkable() && idle >= config.idleShrinkDelayNanos) {

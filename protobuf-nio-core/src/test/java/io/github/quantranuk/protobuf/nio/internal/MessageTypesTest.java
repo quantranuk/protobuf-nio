@@ -1,9 +1,9 @@
 package io.github.quantranuk.protobuf.nio.internal;
 
-import io.github.quantranuk.protobuf.nio.DisconnectReason;
 import io.github.quantranuk.protobuf.nio.proto.TestHeartBeat;
 import org.junit.jupiter.api.Test;
 
+import java.net.ProtocolException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -39,15 +39,13 @@ public class MessageTypesTest {
     @Test
     public void unknownClassIsAProtocolError() {
         byte[] name = "com.example.DoesNotExist".getBytes(StandardCharsets.ISO_8859_1);
-        ConnectionFailure failure = assertThrows(ConnectionFailure.class, () -> types.parser(name, 0, name.length));
-        assertEquals(DisconnectReason.PROTOCOL_ERROR, failure.reason());
+        assertThrows(ProtocolException.class, () -> types.parser(name, 0, name.length));
     }
 
     @Test
     public void nonProtobufClassIsRejectedWithoutInitializingIt() {
         byte[] name = NotAMessage.class.getName().getBytes(StandardCharsets.ISO_8859_1);
-        ConnectionFailure failure = assertThrows(ConnectionFailure.class, () -> types.parser(name, 0, name.length));
-        assertEquals(DisconnectReason.PROTOCOL_ERROR, failure.reason());
+        assertThrows(ProtocolException.class, () -> types.parser(name, 0, name.length));
         assertEquals(0, NOT_A_MESSAGE_INITIALIZED.get());
     }
 

@@ -1,9 +1,9 @@
 package io.github.quantranuk.protobuf.nio.internal;
 
-import io.github.quantranuk.protobuf.nio.DisconnectReason;
 import com.google.protobuf.MessageLite;
 import com.google.protobuf.Parser;
 
+import java.net.ProtocolException;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
@@ -47,9 +47,9 @@ final class MessageTypes {
      * @param offset start of the name
      * @param length length of the name
      * @return the parser of that class
-     * @throws ConnectionFailure ({@link DisconnectReason#PROTOCOL_ERROR}) if the name isn't a loadable protobuf message
+     * @throws ProtocolException if the name isn't a loadable protobuf message class
      */
-    Parser<? extends MessageLite> parser(byte[] bytes, int offset, int length) throws ConnectionFailure {
+    Parser<? extends MessageLite> parser(byte[] bytes, int offset, int length) throws ProtocolException {
         ByteBuffer name = ByteBuffer.wrap(bytes, offset, length);
         Parser<? extends MessageLite> parser = parsers.get(name);
         if (parser == null) {
@@ -61,26 +61,33 @@ final class MessageTypes {
         return parser;
     }
 
+    /** {@link ProtocolException} has no constructor taking a cause. */
+    static ProtocolException protocolException(String message, Throwable cause) {
+        ProtocolException e = new ProtocolException(message);
+        e.initCause(cause);
+        return e;
+    }
+
     int cachedParserCount() {
         return parsers.size();
     }
 
-    private Parser<? extends MessageLite> resolve(String className) throws ConnectionFailure {
+    private Parser<? extends MessageLite> resolve(String className) throws ProtocolException {
         final Class<?> type;
         try {
             // Don't initialise the class until it's known to be a protobuf message: the name comes from the network
             type = Class.forName(className, false, loader);
         } catch (ClassNotFoundException | LinkageError e) {
-            throw new ConnectionFailure(DisconnectReason.PROTOCOL_ERROR, "Unknown message class: " + className, e);
+            throw protocolException("Unknown message class: " + className, e);
         }
         if (!MessageLite.class.isAssignableFrom(type)) {
-            throw new ConnectionFailure(DisconnectReason.PROTOCOL_ERROR, "Not a protobuf message class: " + className);
+            throw new ProtocolException("Not a protobuf message class: " + className);
         }
         try {
             MessageLite defaultInstance = (MessageLite) type.getMethod("getDefaultInstance").invoke(null);
             return defaultInstance.getParserForType();
         } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException | RuntimeException | LinkageError e) {
-            throw new ConnectionFailure(DisconnectReason.PROTOCOL_ERROR, "Unable to get the parser of " + className, e);
+            throw protocolException("Unable to get the parser of " + className, e);
         }
     }
 }

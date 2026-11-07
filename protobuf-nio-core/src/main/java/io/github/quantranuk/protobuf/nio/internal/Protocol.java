@@ -1,7 +1,7 @@
 package io.github.quantranuk.protobuf.nio.internal;
 
-import io.github.quantranuk.protobuf.nio.DisconnectReason;
 
+import java.net.ProtocolException;
 import java.nio.ByteBuffer;
 
 /**
@@ -40,19 +40,19 @@ public final class Protocol {
      * @param bytes  buffer holding the peer's preamble
      * @param offset start of the preamble
      * @return the protocol version to use with this peer
-     * @throws ConnectionFailure ({@link DisconnectReason#PROTOCOL_MISMATCH}) for a bad magic or no common version
+     * @throws ProtocolException for a bad magic or no common version
      */
-    static int negotiate(byte[] bytes, int offset) throws ConnectionFailure {
+    static int negotiate(byte[] bytes, int offset) throws ProtocolException {
         ByteBuffer preamble = ByteBuffer.wrap(bytes, offset, PREAMBLE_LENGTH);
         int magic = preamble.getInt();
         if (magic != PREAMBLE_MAGIC) {
-            throw new ConnectionFailure(DisconnectReason.PROTOCOL_MISMATCH,
+            throw new ProtocolException(
                     String.format("Bad protocol preamble 0x%08X: the peer isn't a protobuf-nio 2.x endpoint", magic));
         }
         int peerVersion = Short.toUnsignedInt(preamble.getShort());
         int version = Math.min(VERSION, peerVersion);
         if (version < MIN_VERSION) {
-            throw new ConnectionFailure(DisconnectReason.PROTOCOL_MISMATCH,
+            throw new ProtocolException(
                     "No common protocol version: the peer supports up to " + peerVersion + ", this side " + MIN_VERSION + " to " + VERSION);
         }
         return version;

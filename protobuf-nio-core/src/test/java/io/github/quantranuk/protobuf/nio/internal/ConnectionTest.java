@@ -12,6 +12,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.net.SocketTimeoutException;
+import java.net.ProtocolException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -206,21 +208,21 @@ public class ConnectionTest {
     public void badPreambleIsAProtocolMismatch() throws Exception {
         RawPeer peer = rawPeer(config());
         peer.out.write(new byte[]{1, 2, 3, 4, 5, 6, 7, 8});
-        assertHandshakeFails(peer, DisconnectReason.PROTOCOL_MISMATCH);
+        assertHandshakeFails(peer, ProtocolException.class);
     }
 
     @Test
     public void onePointXPeerIsAProtocolMismatch() throws Exception {
         RawPeer peer = rawPeer(config());
         peer.out.write(ProtobufSerializer.serialize(request(1)));   // 1.x sends frames at once, without a preamble
-        assertHandshakeFails(peer, DisconnectReason.PROTOCOL_MISMATCH);
+        assertHandshakeFails(peer, ProtocolException.class);
     }
 
     @Test
     public void unsupportedPeerVersionIsAProtocolMismatch() throws Exception {
         RawPeer peer = rawPeer(config());
         peer.out.write(Protocol.preamble(0, 0));
-        assertHandshakeFails(peer, DisconnectReason.PROTOCOL_MISMATCH);
+        assertHandshakeFails(peer, ProtocolException.class);
     }
 
     @Test
@@ -236,7 +238,7 @@ public class ConnectionTest {
     @Test
     public void missingPreambleTimesOut() throws Exception {
         RawPeer peer = rawPeer(config().handshakeTimeout(Duration.ofMillis(200)));
-        assertHandshakeFails(peer, DisconnectReason.PROTOCOL_MISMATCH);
+        assertHandshakeFails(peer, SocketTimeoutException.class);
     }
 
     @Test
@@ -281,7 +283,7 @@ public class ConnectionTest {
         Disconnect disconnect = peer.events.disconnects.poll(5, TimeUnit.SECONDS);
         assertNotNull(disconnect);
         assertEquals(DisconnectReason.PROTOCOL_ERROR, disconnect.reason);
-        assertNotNull(disconnect.cause);
+        assertInstanceOf(ProtocolException.class, disconnect.cause);
         assertClosedByPeer(peer.socket);
     }
 
@@ -330,7 +332,9 @@ public class ConnectionTest {
     public void readTimeoutClosesAnIdleConnection() throws Exception {
         Pair pair = connect(config(), config().readTimeout(Duration.ofMillis(200)));
         long start = System.nanoTime();
-        assertEquals(DisconnectReason.READ_TIMEOUT, pair.server.events.disconnects.poll(5, TimeUnit.SECONDS).reason);
+        Disconnect disconnect = pair.server.events.disconnects.poll(5, TimeUnit.SECONDS);
+        assertEquals(DisconnectReason.READ_TIMEOUT, disconnect.reason);
+        assertInstanceOf(SocketTimeoutException.class, disconnect.cause);
         long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
         assertTrue(elapsedMillis >= 150 && elapsedMillis < 2000, "Closed after " + elapsedMillis + " ms");
         assertEquals(DisconnectReason.CLOSED_BY_PEER, pair.client.events.disconnects.poll(5, TimeUnit.SECONDS).reason);
@@ -371,6 +375,7 @@ public class ConnectionTest {
         Disconnect disconnect = events.disconnects.poll(10, TimeUnit.SECONDS);
         assertNotNull(disconnect);
         assertEquals(DisconnectReason.WRITE_TIMEOUT, disconnect.reason);
+        assertInstanceOf(SocketTimeoutException.class, disconnect.cause);
         assertEquals(sent, connection.messagesWritten() + events.failures.size(), "Every message written or failed");
         assertEquals(0, connection.pendingMessages());
     }
@@ -545,11 +550,10 @@ public class ConnectionTest {
         return new RawPeer(sockets[0], sockets[0].getOutputStream(), connection, events);
     }
 
-    private static void assertHandshakeFails(RawPeer peer, DisconnectReason reason) throws Exception {
+    private static void assertHandshakeFails(RawPeer peer, Class<? extends IOException> exception) throws Exception {
         ExecutionException e = assertThrows(ExecutionException.class, () -> peer.connection.handshake().get(5, TimeUnit.SECONDS));
-        ConnectionFailure failure = assertInstanceOf(ConnectionFailure.class, e.getCause());
-        assertEquals(reason, failure.reason());
-        assertEquals(reason, peer.connection.closedFuture().get(5, TimeUnit.SECONDS));
+        assertInstanceOf(exception, e.getCause());
+        assertEquals(DisconnectReason.PROTOCOL_MISMATCH, peer.connection.closedFuture().get(5, TimeUnit.SECONDS));
         assertTrue(peer.events.calls.isEmpty(), "Listener called after a failed handshake: " + peer.events.calls);
         assertClosedByPeer(peer.socket);
     }

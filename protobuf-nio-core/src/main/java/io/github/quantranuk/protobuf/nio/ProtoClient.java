@@ -44,9 +44,11 @@ public interface ProtoClient extends AutoCloseable {
      * <p>
      * The host name is resolved here, not at {@code build()}.
      *
-     * @throws IOException           on failure or timeout ({@code ConnectException}, {@code SocketTimeoutException},
-     *                               {@code UnknownHostException}, a protocol mismatch, ...), or if {@link #close()} was
-     *                               called while connecting
+     * @throws java.net.ProtocolException if the peer isn't a protobuf-nio 2.x endpoint (bad preamble) or has no
+     *                               protocol version in common with this side; retrying against it won't help
+     * @throws IOException           on any other failure or timeout ({@code ConnectException},
+     *                               {@code SocketTimeoutException} for the connect or handshake timeout,
+     *                               {@code UnknownHostException}, ...), or if {@link #close()} was called while connecting
      * @throws IllegalStateException if {@code connect()} was already called, or the client was closed before connecting
      */
     void connect() throws IOException;
