@@ -272,6 +272,11 @@ public final class Connection {
         return queue.size();
     }
 
+    /** How long the writer has been blocked in the current socket write; 0 if it isn't writing. For tests. */
+    long writeBlockedNanos() {
+        return writing ? System.nanoTime() - writeStartedNanos : 0;
+    }
+
     /** Messages written to the socket so far. */
     public long messagesWritten() {
         return messagesWritten;

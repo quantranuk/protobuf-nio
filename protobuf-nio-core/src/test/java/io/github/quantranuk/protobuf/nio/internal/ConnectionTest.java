@@ -353,7 +353,8 @@ public class ConnectionTest {
         }
         assertEquals(0, peer.events.raws.poll(5, TimeUnit.SECONDS).payload.length);
         assertTrue(peer.events.messages.isEmpty());
-        assertTrue(peer.events.views.size() <= 2, "Views not reused: " + peer.events.views.size());   // one per read buffer
+        // One view per read buffer, and the buffer is replaced only a few times as it grows
+        assertTrue(peer.events.views.size() <= 10, "Views not reused: " + peer.events.views.size());
         assertTrue(peer.connection.isOpen());
     }
 
@@ -384,8 +385,8 @@ public class ConnectionTest {
             assertEquals(SendException.Reason.WRITE_FAILED, failure.cause.reason());
         }
         assertTrue(client.isOpen());
-        assertEquals(0, client.pendingMessages());
-        assertEquals(0, client.pendingBytes());
+        // The writer updates the counts just after its write, so the peer may already have the messages
+        awaitTrue(() -> client.pendingMessages() == 0 && client.pendingBytes() == 0);
     }
 
     static Stream<Arguments> brokenMessages() {
@@ -606,8 +607,8 @@ public class ConnectionTest {
             gate.countDown();
             assertReceivedInOrder(pair.server.events, sent, List.of());
             assertTrue(pair.client.events.failures.isEmpty());
-            assertEquals(0, client.pendingMessages());
-            assertEquals(0, client.pendingBytes());
+            // The writer updates the counts just after its write, so the peer may already have the messages
+            awaitTrue(() -> client.pendingMessages() == 0 && client.pendingBytes() == 0);
         } finally {
             gate.countDown();
         }
@@ -759,21 +760,19 @@ public class ConnectionTest {
         Pair pair = stalledPair(config().overflowPolicy(OverflowPolicy.DROP_OLDEST).maxPendingBytes(1024 * 1024), gate);
         try {
             Connection client = pair.client.connection;
+            // A small message first, so the server's reader is held before the big one (it reads a whole frame
+            // before calling onMessage)
+            assertTrue(client.send(numbered(0)));
+            assertNotNull(pair.server.events.messages.poll(5, TimeUnit.SECONDS));
             HeartBeatRequest big = request("b".repeat(600 * 1024));
-            int sent = 0;
-            do {
-                assertTrue(client.send(big));
-                sent++;
-                awaitTrue(() -> client.queuedMessages() == 0);
-            } while (!stalled(client));
+            assertTrue(client.send(big));
+            awaitTrue(() -> client.queuedMessages() == 0 && stalled(client));
             assertFalse(client.send(big));
             Failure failure = pair.client.events.failures.poll(5, TimeUnit.SECONDS);
             assertEquals(SendException.Reason.REJECTED, failure.cause.reason());
             assertTrue(pair.client.events.failures.isEmpty());
             gate.countDown();
-            for (int i = 0; i < sent; i++) {
-                assertNotNull(pair.server.events.messages.poll(10, TimeUnit.SECONDS));
-            }
+            assertEquals(big, pair.server.events.messages.poll(10, TimeUnit.SECONDS));
         } finally {
             gate.countDown();
         }
@@ -892,14 +891,16 @@ public class ConnectionTest {
                 return sent;
             }
             assertTrue(System.nanoTime() < deadline, "The queue never filled");
+            Thread.sleep(10);
         }
     }
 
-    /** @return true if nothing has been written for 100 ms */
-    private static boolean stalled(Connection connection) throws InterruptedException {
-        long written = connection.messagesWritten();
-        Thread.sleep(100);
-        return connection.messagesWritten() == written;
+    /**
+     * @return true if the writer has been blocked in a socket write for over 100 ms. With the peer's reader held, its
+     *         receive window doesn't grow, so the write stays blocked.
+     */
+    private static boolean stalled(Connection connection) {
+        return connection.writeBlockedNanos() > TimeUnit.MILLISECONDS.toNanos(100);
     }
 
     private static HeartBeatRequest numbered(long i) {
