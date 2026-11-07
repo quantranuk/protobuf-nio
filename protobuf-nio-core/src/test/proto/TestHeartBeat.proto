@@ -1,7 +1,7 @@
 syntax = "proto3";
-package com.github.quantranuk.protobuf.nio.proto;
+package io.github.quantranuk.protobuf.nio.proto;
 
-option java_package = "com.github.quantranuk.protobuf.nio.proto";
+option java_package = "io.github.quantranuk.protobuf.nio.proto";
 option java_outer_classname = "TestHeartBeat";
 
 message HeartBeatRequest {

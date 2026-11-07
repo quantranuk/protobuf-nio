@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.github.quantranuk</groupId>
+    <groupId>io.github.quantranuk</groupId>
     <artifactId>protobuf-nio</artifactId>
     <version>2.0.0-SNAPSHOT</version>
     <modules>
@@ -16,9 +16,8 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <!-- Users need Java 21+. The build itself requires JDK 25 (see the enforcer rule), and release=21 makes
-             javac reject any JDK API newer than 21. -->
-        <maven.compiler.release>21</maven.compiler.release>
+        <!-- Java 25+ for building and running: 2.0 relies on virtual threads without synchronized pinning (JEP 491) -->
+        <maven.compiler.release>25</maven.compiler.release>
 
         <!-- Dependencies -->
         <protobuf.version>4.36.2</protobuf.version>

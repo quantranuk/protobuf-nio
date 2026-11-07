@@ -7,23 +7,14 @@ on:
 
 jobs:
   build:
-    # Always build with JDK 25 (the enforcer requires it) and compile for Java 21 (maven.compiler.release),
-    # then run the tests on each Java version users can run the library on.
-    name: Build (tests on Java ${{ matrix.test-java }})
+    name: Build
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        test-java: [ 21, 25 ]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          # The last version listed becomes the default JAVA_HOME (used to run Maven); every version also gets JAVA_HOME_<version>_X64
-          java-version: |
-            21
-            25
+          java-version: 25
           cache: maven
-      - name: Build with JDK 25, test on Java ${{ matrix.test-java }}
-        run: ./mvnw -B verify "-Djvm=${JAVA_HOME_${{ matrix.test-java }}_X64}/bin/java"
+      - name: Build and test
+        run: ./mvnw -B verify

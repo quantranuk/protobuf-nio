@@ -4,7 +4,7 @@
 
 A small Java library for sending and receiving [Protocol Buffers](https://protobuf.dev/) messages over TCP, built directly on Java NIO asynchronous sockets (`java.nio.channels.Asynchronous*`). It has no Netty or Mina dependency.
 
-- **No framework dependencies:** only `protobuf-java` and `slf4j-api`, both supplied by your application.
+- **No framework dependencies:** only `protobuf-java` and `slf4j-api`.
 - **Protobuf-native API:** send any generated `Message`, and receive it on the other side already parsed. There's no per-type registration.
 - **Non-blocking sends:** `sendMessage` returns immediately. Messages are batched and written by a dedicated writer thread.
 - **Fast:** about 2 million request/response round-trips per second on one connection (see [Benchmark](#benchmark)).
@@ -14,8 +14,8 @@ A small Java library for sending and receiving [Protocol Buffers](https://protob
 
 ## Requirements
 
-- Java 21 or later
-- `protobuf-java` 4.x and `slf4j-api` 2.x on the classpath. They are `provided` dependencies, so your project must declare them, plus an SLF4J backend if you want logs.
+- Java 25 or later
+- `protobuf-java` 4.x and `slf4j-api` 2.x come with the library as regular dependencies. Add an SLF4J backend (for example Logback or `log4j-slf4j2-impl`) if you want to see its logs.
 
 ## Installation
 
@@ -27,25 +27,17 @@ cd protobuf-nio
 ./mvnw clean install
 ```
 
-Then add the dependencies:
+Then add the dependency:
 
 ```xml
 <dependency>
-    <groupId>com.github.quantranuk</groupId>
+    <groupId>io.github.quantranuk</groupId>
     <artifactId>protobuf-nio-core</artifactId>
     <version>2.0.0-SNAPSHOT</version>
 </dependency>
-<dependency>
-    <groupId>com.google.protobuf</groupId>
-    <artifactId>protobuf-java</artifactId>
-    <version>4.36.2</version>
-</dependency>
-<dependency>
-    <groupId>org.slf4j</groupId>
-    <artifactId>slf4j-api</artifactId>
-    <version>2.0.20</version>
-</dependency>
 ```
+
+Your generated protobuf classes must be compatible with the `protobuf-java` version the library brings in (4.x). If your project declares its own `protobuf-java` version, Maven uses yours.
 
 ## Quick start
 
@@ -114,7 +106,7 @@ ProtoSocketChannel connectWithRetry(String host, int port) throws InterruptedExc
 }
 ```
 
-Working examples are in [`protobuf-nio-sample`](protobuf-nio-sample/src/main/java/com/github/quantranuk/protobuf/nio/sample). Start `SampleServer`, then run `SampleClient`, `SampleClientBenchmarkTest` or `MultiClientsTest`.
+Working examples are in [`protobuf-nio-sample`](protobuf-nio-sample/src/main/java/io/github/quantranuk/protobuf/nio/sample). Start `SampleServer`, then run `SampleClient`, `SampleClientBenchmarkTest` or `MultiClientsTest`.
 
 ## Handlers
 
@@ -235,7 +227,7 @@ Results depend on hardware, message size and network. Run the samples to measure
 ./mvnw test -pl protobuf-nio-core             # core tests only
 ```
 
-Use the Maven Wrapper (`./mvnw`). Building requires JDK 25 or later. The library is compiled for Java 21, and CI runs the tests on both Java 21 and Java 25.
+Use the Maven Wrapper (`./mvnw`). Building requires JDK 25 or later. The library is compiled for Java 25.
 
 ## Why no SSL/TLS?
 

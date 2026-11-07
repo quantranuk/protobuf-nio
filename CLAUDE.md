@@ -8,7 +8,7 @@ Java library for sending and receiving protobuf messages over Java NIO sockets (
 
 ## Build & test
 
-Maven multi-module project compiled for Java 21 (`maven.compiler.release=21`), so don't use JDK APIs newer than 21 in main code; javac rejects them. Building requires JDK 25+ (enforcer) and Maven 3.9+. Always build with the Maven Wrapper (`./mvnw`, pinned to Apache Maven 3.9.12): Ubuntu's packaged `/usr/bin/mvn` can't load the ascopes protobuf plugin (it fails with a Guice `NullInjectedIntoNonNullable` error). On this machine JDK 25 is at `/usr/lib/jvm/java-25-openjdk-amd64`, but the default `java` is 21, so set `JAVA_HOME` if needed.
+Maven multi-module project compiled for Java 25 (`maven.compiler.release=25`). Java 25 is the baseline because 2.0 moves to virtual threads, which pin carrier threads inside `synchronized` before JDK 24 (JEP 491). Building requires JDK 25+ (enforcer) and Maven 3.9+. Always build with the Maven Wrapper (`./mvnw`, pinned to Apache Maven 3.9.12): Ubuntu's packaged `/usr/bin/mvn` can't load the ascopes protobuf plugin (it fails with a Guice `NullInjectedIntoNonNullable` error). On this machine JDK 25 is at `/usr/lib/jvm/java-25-openjdk-amd64`, but the default `java` is 21, so set `JAVA_HOME` if needed.
 
 ```bash
 ./mvnw clean install                       # build all modules
@@ -17,7 +17,7 @@ Maven multi-module project compiled for Java 21 (`maven.compiler.release=21`), s
 ./mvnw test -pl protobuf-nio-core -Dtest=ProtobufSerializerTest#testName   # single method
 ```
 
-All dependency and plugin versions live as properties in the root `pom.xml` (`dependencyManagement` with the JUnit and Log4j BOMs, plus `pluginManagement`). Modules declare dependencies without versions. Tests use JUnit Jupiter (JUnit 6), run by surefire 3.x. CI is GitHub Actions (`.github/workflows/build.yml`): it builds with Temurin 25 and runs `./mvnw -B verify` with the tests on Java 21 and on Java 25 (matrix, via surefire's `-Djvm=`). To run the tests on Java 21 locally: `./mvnw test -Djvm=/usr/lib/jvm/java-21-openjdk-amd64/bin/java`.
+All dependency and plugin versions live as properties in the root `pom.xml` (`dependencyManagement` with the JUnit and Log4j BOMs, plus `pluginManagement`). Modules declare dependencies without versions. Tests use JUnit Jupiter (JUnit 6), run by surefire 3.x. CI is GitHub Actions (`.github/workflows/build.yml`): it builds and tests with Temurin 25 by running `./mvnw -B verify`.
 
 Protobuf code is generated at build time by `io.github.ascopes:protobuf-maven-plugin`, with the `protoc` version tied to `${protobuf.version}`:
 - core: `src/test/proto/TestHeartBeat.proto` → test classes (`generate-test`)
@@ -41,4 +41,4 @@ The sample module's "tests" (`SampleServer`, `SampleClient`, `SampleClientBenchm
 
 `init()` / `disconnect()` carry `jakarta.annotation` `@PostConstruct` / `@PreDestroy` so the channels can be managed as DI beans. The factory builders call `init()` themselves.
 
-`protobuf-java` (4.x) and `slf4j-api` are `provided` scope in core. Consumers supply them. Log4j is test scope only in core, so don't add a logging backend to core's compile or runtime scope.
+`protobuf-java` (4.x) and `slf4j-api` are compile-scope dependencies of core, so consumers get them transitively. `jakarta.annotation-api` is `<optional>` (only needed for DI). Log4j is test scope only in core, so don't add a logging backend to core's compile or runtime scope.
