@@ -43,6 +43,7 @@ public final class ProtoChannelFactory {
         private int writeBufferSize = DefaultSetting.DEFAULT_CLIENT_BUFFER_SIZE;
         private long readTimeoutMillis = DefaultSetting.DEFAULT_READ_TIMEOUT_MILLIS;
         private long writeTimeoutMillis = DefaultSetting.DEFAULT_WRITE_TIMEOUT_MILLIS;
+        private int maxMessageSize = DefaultSetting.DEFAULT_MAX_MESSAGE_SIZE;
         private ExecutorService readExecutor = null;
         private ExecutorService writeExecutor = null;
 
@@ -92,6 +93,17 @@ public final class ProtoChannelFactory {
         }
 
         /**
+         * The maximum protobuf payload size of an incoming message. A peer sending a larger message is disconnected.
+         * The default value is 67108864 (64 MiB)
+         * @param maxMessageSize maximum payload size in bytes
+         * @return builder
+         */
+        public ClientBuilder setMaxMessageSize(int maxMessageSize) {
+            this.maxMessageSize = maxMessageSize;
+            return this;
+        }
+
+        /**
          * <p>The executor that will execute read activities. This must be a single thread executor only.
          * Use this method to share the same thread between multiple clients</p>
          * <p>If not set a new thread will be spawn by default</p>
@@ -125,6 +137,7 @@ public final class ProtoChannelFactory {
             channel.setWriteBufferSize(writeBufferSize);
             channel.setReadTimeoutMillis(readTimeoutMillis);
             channel.setWriteTimeoutMillis(writeTimeoutMillis);
+            channel.setMaxMessageSize(maxMessageSize);
             channel.setReadExecutor(readExecutor);
             channel.setWriteExecutor(writeExecutor);
             channel.init();
@@ -141,6 +154,7 @@ public final class ProtoChannelFactory {
         private int writeBufferSize = DefaultSetting.DEFAULT_CLIENT_BUFFER_SIZE;
         private long readTimeoutMillis = DefaultSetting.DEFAULT_READ_TIMEOUT_MILLIS;
         private long writeTimeoutMillis = DefaultSetting.DEFAULT_WRITE_TIMEOUT_MILLIS;
+        private int maxMessageSize = DefaultSetting.DEFAULT_MAX_MESSAGE_SIZE;
 
         private ServerBuilder(int port) {
             this.port = port;
@@ -187,6 +201,17 @@ public final class ProtoChannelFactory {
         }
 
         /**
+         * The maximum protobuf payload size of an incoming message. A peer sending a larger message is disconnected.
+         * The default value is 67108864 (64 MiB)
+         * @param maxMessageSize maximum payload size in bytes
+         * @return builder
+         */
+        public ServerBuilder setMaxMessageSize(int maxMessageSize) {
+            this.maxMessageSize = maxMessageSize;
+            return this;
+        }
+
+        /**
          * Build the {@link ProtoServerSocketChannel}
          * @return ProtoSocketChannel
          */
@@ -196,6 +221,7 @@ public final class ProtoChannelFactory {
             channel.setWriteBufferSize(writeBufferSize);
             channel.setReadTimeoutMillis(readTimeoutMillis);
             channel.setWriteTimeoutMillis(writeTimeoutMillis);
+            channel.setMaxMessageSize(maxMessageSize);
             channel.init();
             return channel;
         }

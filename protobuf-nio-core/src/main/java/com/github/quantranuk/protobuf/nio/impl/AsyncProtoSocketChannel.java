@@ -26,6 +26,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 public class AsyncProtoSocketChannel implements ProtoSocketChannel {
 
@@ -47,8 +49,9 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
     private int maxMessageWriteQueueSize = DefaultSetting.MAX_WRITE_MESSAGE_QUEUE_SIZE;
     private long readTimeoutMillis = DefaultSetting.DEFAULT_READ_TIMEOUT_MILLIS;
     private long writeTimeoutMillis = DefaultSetting.DEFAULT_WRITE_TIMEOUT_MILLIS;
+    private int maxMessageSize = DefaultSetting.DEFAULT_MAX_MESSAGE_SIZE;
     private boolean isInitialized = false;
-    private boolean isShuttingDown = false;
+    private final AtomicBoolean isShuttingDown = new AtomicBoolean();
     private boolean isInjectedReadExecutor = false;
     private boolean isInjectedWriteExecutor = false;
     private ExecutorService readExecutor;
@@ -82,8 +85,8 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
                 throw new IllegalStateException("Unable to open socket channel", e);
             }
         }
-        reader = new SocketChannelReader(socketChannel, socketAddress, readTimeoutMillis, readBufferSize, readExecutor, new MessageReadCompletionHandler());
-        writer = new SocketChannelWriter(socketChannel, writeTimeoutMillis, writeBufferSize, maxMessageWriteQueueSize, writeExecutor, new MessageWriteCompletionHandler());
+        reader = new SocketChannelReader(socketChannel, socketAddress, readTimeoutMillis, readBufferSize, maxMessageSize, readExecutor, new MessageReadCompletionHandler());
+        writer = new SocketChannelWriter(socketChannel, writeTimeoutMillis, writeBufferSize, maxMessageWriteQueueSize, writeExecutor, new MessageWriteCompletionHandler(), this::onWriteFailure);
     }
 
     @Override
@@ -91,7 +94,7 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         try {
             socketChannel.connect(socketAddress).get();
             LOGGER.debug("Connected to {}", socketAddress);
-            connectionHandlers.forEach(handler -> handler.onConnected(socketAddress));
+            notifyHandlers(connectionHandlers, handler -> handler.onConnected(socketAddress));
             reader.start();
         } catch (InterruptedException e) {
             LOGGER.debug("Interrupted while connecting to {}", socketAddress, e);
@@ -109,9 +112,15 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
     @Override
     @PreDestroy
     public void disconnect() {
-        isShuttingDown = true;
+        // Reader failure, writer failure and the user can all call this concurrently: run it exactly once
+        if (!isShuttingDown.compareAndSet(false, true)) {
+            return;
+        }
         if (reader != null) {
             reader.stop();
+        }
+        if (writer != null) {
+            writer.stop();
         }
         if (socketChannel != null) {
             try {
@@ -121,11 +130,11 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
             }
         }
         LOGGER.debug("Disconnected from {}", socketAddress);
-        disconnectionHandlers.forEach(handler -> handler.onDisconnected(socketAddress));
-        if (!isInjectedReadExecutor) {
+        notifyHandlers(disconnectionHandlers, handler -> handler.onDisconnected(socketAddress));
+        if (readExecutor != null && !isInjectedReadExecutor) {
             readExecutor.shutdown();
         }
-        if (!isInjectedWriteExecutor) {
+        if (writeExecutor != null && !isInjectedWriteExecutor) {
             writeExecutor.shutdown();
         }
     }
@@ -208,6 +217,17 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         this.writeTimeoutMillis = writeTimeoutMillis;
     }
 
+    /**
+     * Maximum accepted protobuf payload size of an incoming message. A peer sending a larger message is disconnected.
+     * @param maxMessageSize the maximum payload size in bytes
+     */
+    public void setMaxMessageSize(int maxMessageSize) {
+        if (maxMessageSize <= 0) {
+            throw new IllegalArgumentException("Invalid max message size: " + maxMessageSize);
+        }
+        this.maxMessageSize = maxMessageSize;
+    }
+
     public void setSocketChannel(AsynchronousSocketChannel socketChannel) {
         this.socketChannel = socketChannel;
     }
@@ -230,16 +250,36 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
         }
     }
 
+    private void onWriteFailure(Throwable exc) {
+        if (!isShuttingDown.get()) {
+            LOGGER.debug("Unable to write to {}", socketAddress, exc);
+            disconnect();
+        }
+    }
+
+    /**
+     * Invoke user handlers so that an exception thrown by one of them cannot break the read/write loop or skip the others.
+     */
+    private <T> void notifyHandlers(List<T> handlers, Consumer<T> action) {
+        for (T handler : handlers) {
+            try {
+                action.accept(handler);
+            } catch (RuntimeException e) {
+                LOGGER.error("Handler {} threw an exception for {}", handler, socketAddress, e);
+            }
+        }
+    }
+
     private class MessageReadCompletionHandler implements CompletionHandler<Integer, Message> {
 
         @Override
         public void completed(Integer readBytes, Message message) {
-            messageReceivedHandlers.forEach(handler -> handler.onMessageReceived(socketAddress, message));
+            notifyHandlers(messageReceivedHandlers, handler -> handler.onMessageReceived(socketAddress, message));
         }
 
         @Override
         public void failed(Throwable exc, Message message) {
-            if (!isShuttingDown) {
+            if (!isShuttingDown.get()) {
                 LOGGER.debug("Unable to read from {}", socketAddress, exc);
                 disconnect();
             }
@@ -250,12 +290,12 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
 
         @Override
         public void completed(Integer sentBytes, Message message) {
-            messageSentHandlers.forEach(handler -> handler.onMessageSent(socketAddress, message));
+            notifyHandlers(messageSentHandlers, handler -> handler.onMessageSent(socketAddress, message));
         }
 
         @Override
         public void failed(Throwable exc, Message message) {
-            messageSendFailureHandlers.forEach(handler -> handler.onMessageSendFailure(socketAddress, message, exc));
+            notifyHandlers(messageSendFailureHandlers, handler -> handler.onMessageSendFailure(socketAddress, message, exc));
         }
     }
 

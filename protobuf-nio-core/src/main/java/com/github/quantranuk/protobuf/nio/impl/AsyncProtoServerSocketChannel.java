@@ -49,6 +49,7 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
     private int writeBufferSize = DefaultSetting.DEFAULT_SERVER_BUFFER_SIZE;
     private long readTimeoutMillis = DefaultSetting.DEFAULT_READ_TIMEOUT_MILLIS;
     private long writeTimeoutMillis = DefaultSetting.DEFAULT_WRITE_TIMEOUT_MILLIS;
+    private int maxMessageSize = DefaultSetting.DEFAULT_MAX_MESSAGE_SIZE;
     private AsynchronousServerSocketChannel serverSocketChannel;
     private ExecutorService acceptExecutor;
     private ExecutorService readExecutor;
@@ -89,13 +90,15 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
         serverSocketChannel.accept(null, new CompletionHandler<>() {
             @Override
             public void completed(AsynchronousSocketChannel socketChannel, Object attachment) {
-                SocketAddress remoteAddress = getRemoteAddress(socketChannel);
-                LOGGER.info("Accepted connection from {}", remoteAddress);
-                AsyncProtoSocketChannel protobufSocketChannel = createProtobufSocketChannel(socketChannel, remoteAddress);
-                connectionHandlers.forEach(handler -> handler.onConnected(remoteAddress));
-                socketChannels.put(remoteAddress, protobufSocketChannel);
-                protobufSocketChannel.startReading();
-                acceptNewConnection();
+                // Whatever happens to this connection, keep accepting new ones
+                try {
+                    handleAcceptedConnection(socketChannel);
+                } catch (RuntimeException e) {
+                    LOGGER.error("Unable to set up accepted connection at port {}", serverPort, e);
+                    closeQuietly(socketChannel);
+                } finally {
+                    acceptNewConnection();
+                }
             }
 
             @Override
@@ -108,6 +111,29 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
         });
     }
 
+    private void handleAcceptedConnection(AsynchronousSocketChannel socketChannel) {
+        SocketAddress remoteAddress = getRemoteAddress(socketChannel);
+        LOGGER.info("Accepted connection from {}", remoteAddress);
+        AsyncProtoSocketChannel protobufSocketChannel = createProtobufSocketChannel(socketChannel, remoteAddress);
+        socketChannels.put(remoteAddress, protobufSocketChannel);
+        for (ConnectionHandler handler : connectionHandlers) {
+            try {
+                handler.onConnected(remoteAddress);
+            } catch (RuntimeException e) {
+                LOGGER.error("Connection handler {} threw an exception for {}", handler, remoteAddress, e);
+            }
+        }
+        protobufSocketChannel.startReading();
+    }
+
+    private static void closeQuietly(AsynchronousSocketChannel socketChannel) {
+        try {
+            socketChannel.close();
+        } catch (IOException e) {
+            LOGGER.debug("Unable to close socket channel", e);
+        }
+    }
+
     private AsyncProtoSocketChannel createProtobufSocketChannel(AsynchronousSocketChannel socketChannel, SocketAddress remoteAddress) {
         AsyncProtoSocketChannel protobufSocketChannel = new AsyncProtoSocketChannel(remoteAddress);
         protobufSocketChannel.setReadBufferSize(readBufferSize);
@@ -116,6 +142,7 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
         protobufSocketChannel.setWriteExecutor(writeExecutor);
         protobufSocketChannel.setReadTimeoutMillis(readTimeoutMillis);
         protobufSocketChannel.setWriteTimeoutMillis(writeTimeoutMillis);
+        protobufSocketChannel.setMaxMessageSize(maxMessageSize);
         protobufSocketChannel.setSocketChannel(socketChannel);
         protobufSocketChannel.addDisconnectionHandler(socketAddress -> {
             LOGGER.info("Disconnected from {}", socketAddress);
@@ -244,6 +271,17 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
 
     public void setWriteTimeoutMillis(long writeTimeoutMillis) {
         this.writeTimeoutMillis = writeTimeoutMillis;
+    }
+
+    /**
+     * Maximum accepted protobuf payload size of an incoming message. A client sending a larger message is disconnected.
+     * @param maxMessageSize the maximum payload size in bytes
+     */
+    public void setMaxMessageSize(int maxMessageSize) {
+        if (maxMessageSize <= 0) {
+            throw new IllegalArgumentException("Invalid max message size: " + maxMessageSize);
+        }
+        this.maxMessageSize = maxMessageSize;
     }
 
 }

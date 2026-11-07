@@ -6,14 +6,17 @@ import com.google.protobuf.Message;
 
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousSocketChannel;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.CompletionHandler;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 class SocketChannelWriter {
 
@@ -29,14 +32,18 @@ class SocketChannelWriter {
     private final List<Message> messagesBeingWritten;
     private final AtomicBoolean isWritingInProgress;
     private final int maxMessageWriteQueueSize;
+    private final Consumer<Throwable> writeFailureListener;
+    private volatile boolean stopped;
 
     SocketChannelWriter(AsynchronousSocketChannel socketChannel,
                         long writeTimeoutMillis,
                         int writeBufferCapacity,
                         int maxMessageWriteQueueSize,
                         ExecutorService writeExecutor,
-                        CompletionHandler<Integer, Message> messageWriteCompletionHandler) {
+                        CompletionHandler<Integer, Message> messageWriteCompletionHandler,
+                        Consumer<Throwable> writeFailureListener) {
         this.socketChannel = socketChannel;
+        this.writeFailureListener = writeFailureListener;
         this.maxMessageWriteQueueSize = maxMessageWriteQueueSize;
         this.messageWriteCompletionHandler = messageWriteCompletionHandler;
         this.writeCompletionHandler = new WriteCompletionHandler();
@@ -56,11 +63,27 @@ class SocketChannelWriter {
         }
 
         writeExecutor.execute(() -> {
+            if (stopped) {
+                messageWriteCompletionHandler.failed(new ClosedChannelException(), message);
+                return;
+            }
             outboundMessageQueue.add(message);
             if (!isWritingInProgress.getAndSet(true)) {
                 checkMessageQueue();
             }
         });
+    }
+
+    /**
+     * Stop writing. Messages that are still queued are reported as failed. Can be called from any thread.
+     */
+    void stop() {
+        stopped = true;
+        try {
+            writeExecutor.execute(() -> failQueuedMessages(new ClosedChannelException()));
+        } catch (RejectedExecutionException e) {
+            // Executor already shut down: nothing more will run on it, so queued messages cannot be reported
+        }
     }
 
     private void checkMessageQueue() {
@@ -104,27 +127,62 @@ class SocketChannelWriter {
         writeBuffer.clear();
         writeBuffer.put(nextBlock);
         writeBuffer.flip();
-        socketChannel.write(writeBuffer, writeTimeoutMillis, TimeUnit.MILLISECONDS, messages, writeCompletionHandler);
+        try {
+            socketChannel.write(writeBuffer, writeTimeoutMillis, TimeUnit.MILLISECONDS, messages, writeCompletionHandler);
+        } catch (RuntimeException e) {
+            handleWriteFailure(e, messages);
+        }
+    }
+
+    /**
+     * Must run on the write executor. After a failed or timed-out write the channel is in an undefined state,
+     * so every in-flight and queued message is failed and the writer stops accepting new work.
+     */
+    private void handleWriteFailure(Throwable exc, List<Message> messages) {
+        boolean wasStopped = stopped;
+        stopped = true;
+        messages.forEach(message -> messageWriteCompletionHandler.failed(exc, message));
+        messages.clear();
+        failQueuedMessages(exc);
+        isWritingInProgress.set(false);
+        if (!wasStopped) {
+            writeFailureListener.accept(exc);
+        }
+    }
+
+    private void failQueuedMessages(Throwable exc) {
+        Message message;
+        while ((message = outboundMessageQueue.poll()) != null) {
+            messageWriteCompletionHandler.failed(exc, message);
+        }
     }
 
     private final class WriteCompletionHandler implements CompletionHandler<Integer, List<Message>> {
 
         @Override
         public void completed(Integer result, List<Message> messages) {
-            writeExecutor.execute(() -> {
-                int unwrittenBytes = writeBuffer.limit() - result;
-                if (unwrittenBytes > 0) {
-                    writeBytesQueue.pushLast(writeBuffer.array(), result, unwrittenBytes);
-                }
-                writeNextBlock(messages);
-            });
+            try {
+                writeExecutor.execute(() -> {
+                    int unwrittenBytes = writeBuffer.limit() - result;
+                    if (unwrittenBytes > 0) {
+                        writeBytesQueue.pushLast(writeBuffer.array(), result, unwrittenBytes);
+                    }
+                    writeNextBlock(messages);
+                });
+            } catch (RejectedExecutionException e) {
+                // Executor already shut down (channel disconnected): these messages will not be sent
+                messages.forEach(message -> messageWriteCompletionHandler.failed(new ClosedChannelException(), message));
+            }
         }
 
         @Override
         public void failed(Throwable exc, List<Message> messages) {
-            writeExecutor.execute(
-                    () -> messages.forEach(
-                            message -> messageWriteCompletionHandler.failed(exc, message)));
+            try {
+                writeExecutor.execute(() -> handleWriteFailure(exc, messages));
+            } catch (RejectedExecutionException e) {
+                // Executor already shut down (channel disconnected): report directly, nothing else touches writer state now
+                messages.forEach(message -> messageWriteCompletionHandler.failed(exc, message));
+            }
         }
 
     }

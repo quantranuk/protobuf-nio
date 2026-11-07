@@ -102,17 +102,19 @@ public final class ProtobufSerializer {
         try {
             return (Message) protobufParseMethod.invoke(null, protobufPayloadBuffer);
         } catch (IllegalAccessException | InvocationTargetException e) {
-            throw new IllegalStateException("Unable to parse protobuf payload of " + CHARSET.decode(protobufClassNameBuffer), e);
+            throw new IllegalStateException("Unable to parse protobuf payload of " + CHARSET.decode(protobufClassNameBuffer.duplicate()), e);
         }
     }
 
     private static Method getParseMethod(ByteBuffer protobufClassNameBuffer) {
+        // The lookup buffer may be a view over a reusable read buffer, so it must never be stored as a key.
         Method parseMethod = CACHED_PARSE_PROTOBUF_METHODS.get(protobufClassNameBuffer);
         if (parseMethod == null) {
-            String protobufClassName = CHARSET.decode(protobufClassNameBuffer).toString();
+            String protobufClassName = CHARSET.decode(protobufClassNameBuffer.duplicate()).toString();
             final Class<?> protobufClass;
             try {
-                protobufClass = Class.forName(protobufClassName);
+                // Do not initialize the class until it is known to be a protobuf message: the name comes from the network.
+                protobufClass = Class.forName(protobufClassName, false, ProtobufSerializer.class.getClassLoader());
             } catch (ClassNotFoundException e) {
                 throw new IllegalStateException("Invalid protobuf class name: " + protobufClassName, e);
             }
@@ -123,11 +125,13 @@ public final class ProtobufSerializer {
 
             try {
                 parseMethod = protobufClass.getMethod("parseFrom", ByteBuffer.class);
-                protobufClassNameBuffer.flip();
-                CACHED_PARSE_PROTOBUF_METHODS.put(protobufClassNameBuffer, parseMethod);
             } catch (NoSuchMethodException e) {
                 throw new IllegalStateException("Unable to get parse method from : " + protobufClassName, e);
             }
+
+            byte[] keyBytes = new byte[protobufClassNameBuffer.remaining()];
+            protobufClassNameBuffer.duplicate().get(keyBytes);
+            CACHED_PARSE_PROTOBUF_METHODS.putIfAbsent(ByteBuffer.wrap(keyBytes).asReadOnlyBuffer(), parseMethod);
         }
         return parseMethod;
     }
