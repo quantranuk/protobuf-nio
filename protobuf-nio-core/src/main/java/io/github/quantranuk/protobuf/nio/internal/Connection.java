@@ -2,6 +2,7 @@ package io.github.quantranuk.protobuf.nio.internal;
 
 import io.github.quantranuk.protobuf.nio.DisconnectReason;
 import io.github.quantranuk.protobuf.nio.SendException;
+import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.MessageLite;
 import com.google.protobuf.Parser;
 import org.slf4j.Logger;
@@ -128,11 +129,14 @@ public final class Connection {
     private long lastReceivedNanos;
     private int soTimeoutMillis = -1;
     private final byte[][] cachedNames = new byte[PARSER_CACHE_SIZE][];
-    private final Parser<?>[] cachedParsers = new Parser<?>[PARSER_CACHE_SIZE];
+    private final Object[] cachedTargets = new Object[PARSER_CACHE_SIZE];   // Parser or ConnectionConfig.RawHandler
     private int nextCacheSlot;
+    private ByteBuffer rawView;   // reused view over the read buffer for raw handlers
 
     // Writer thread only
     private byte[] writeBuffer;
+    private CodedOutputStream encoder;   // over writeBuffer, reused across batches until the buffer is full
+    private int encoderBase;             // offset in writeBuffer where the encoder starts
     private boolean growWriteBuffer;
     private final ArrayList<Object> inFlight = new ArrayList<>();
     private Object carry;   // taken from the queue but didn't fit in the last batch
@@ -634,14 +638,21 @@ public final class Connection {
                 }
                 continue;
             }
-            MessageLite message = parse(buffer, position + HEADER_LENGTH, nameLength, payloadLength);
-            readStart += frameLength;
-            notifyMessage(message);
+            int nameOffset = position + HEADER_LENGTH;
+            Object target = target(buffer, nameOffset, nameLength);
+            if (target instanceof ConnectionConfig.RawHandler raw) {
+                readStart += frameLength;   // the buffer isn't touched again until the handler returns
+                notifyRawMessage(raw, buffer, nameOffset + nameLength, payloadLength);
+            } else {
+                MessageLite message = parse((Parser<?>) target, buffer, nameOffset, nameLength, payloadLength);
+                readStart += frameLength;
+                notifyMessage(message);
+            }
         }
     }
 
-    private MessageLite parse(byte[] buffer, int nameOffset, int nameLength, int payloadLength) throws ProtocolException {
-        Parser<?> parser = parser(buffer, nameOffset, nameLength);
+    private MessageLite parse(Parser<?> parser, byte[] buffer, int nameOffset, int nameLength, int payloadLength)
+            throws ProtocolException {
         try {
             // Not aliased: the message never references the read buffer, which gets reused
             return (MessageLite) parser.parseFrom(buffer, nameOffset + nameLength, payloadLength);
@@ -651,17 +662,26 @@ public final class Connection {
         }
     }
 
-    // Streams usually carry few message types, and comparing a few names is cheaper than hashing the name on every message
-    private Parser<?> parser(byte[] buffer, int offset, int length) throws ProtocolException {
-        Parser<?> parser = cachedParser(buffer, offset, length);
-        if (parser != null) {
-            return parser;
+    /**
+     * Resolves a class name to its raw handler or parser. Raw-handler types come first, so they're always allowed.
+     * Streams usually carry few message types, and comparing a few names is cheaper than hashing the name on every
+     * message, so an 8-entry cache sits in front.
+     */
+    private Object target(byte[] buffer, int offset, int length) throws ProtocolException {
+        Object target = cachedTarget(buffer, offset, length);
+        if (target != null) {
+            return target;
         }
-        parser = config.allowedTypes == null ? messageTypes.parser(buffer, offset, length) : allowedParser(buffer, offset, length);
+        if (!config.rawHandlers.isEmpty()) {
+            target = config.rawHandlers.get(ByteBuffer.wrap(buffer, offset, length));
+        }
+        if (target == null) {
+            target = config.allowedTypes == null ? messageTypes.parser(buffer, offset, length) : allowedParser(buffer, offset, length);
+        }
         cachedNames[nextCacheSlot] = Arrays.copyOfRange(buffer, offset, offset + length);
-        cachedParsers[nextCacheSlot] = parser;
+        cachedTargets[nextCacheSlot] = target;
         nextCacheSlot = (nextCacheSlot + 1) % PARSER_CACHE_SIZE;
-        return parser;
+        return target;
     }
 
     /** Looks the name up in the allowlist only, so a disallowed class is never loaded. */
@@ -673,14 +693,14 @@ public final class Connection {
         return parser;
     }
 
-    private Parser<?> cachedParser(byte[] buffer, int offset, int length) {
+    private Object cachedTarget(byte[] buffer, int offset, int length) {
         for (int i = 0; i < PARSER_CACHE_SIZE; i++) {
             byte[] name = cachedNames[i];
             if (name == null) {
                 break;
             }
             if (name.length == length && Arrays.equals(name, 0, length, buffer, offset, offset + length)) {
-                return cachedParsers[i];
+                return cachedTargets[i];
             }
         }
         return null;
@@ -701,6 +721,7 @@ public final class Connection {
         } else if (pending == 0) {
             if (capacity > config.readBufferSize) {
                 readBuffer = new byte[config.readBufferSize];   // grown for one big frame: don't keep it
+                rawView = null;
             }
             readStart = 0;
             readEnd = 0;
@@ -733,6 +754,7 @@ public final class Connection {
     private void replaceReadBuffer(byte[] target, int pending) {
         System.arraycopy(readBuffer, readStart, target, 0, pending);
         readBuffer = target;
+        rawView = null;
         readStart = 0;
         readEnd = pending;
         growReadBuffer = false;
@@ -790,6 +812,7 @@ public final class Connection {
         }
         if (readBufferShrinkable() && idle >= config.idleShrinkDelayNanos) {
             readBuffer = new byte[IDLE_READ_BUFFER_SIZE];
+            rawView = null;   // would keep the big buffer alive
             readStart = 0;
             readEnd = 0;
             growReadBuffer = false;
@@ -808,6 +831,7 @@ public final class Connection {
         failQueuedAfterClose();
         Watchdog.INSTANCE.unregister(this);
         readBuffer = null;
+        rawView = null;
         if (connected) {
             LOG.debug("{} closed: {}", this, t.reason(), t.cause());
             notifyDisconnected(t);
@@ -833,7 +857,7 @@ public final class Connection {
     private void writeLoop() {
         try {
             OutputStream out = socket.getOutputStream();
-            timedWrite(out, Protocol.PREAMBLE, Protocol.PREAMBLE.length);
+            timedWrite(out, Protocol.PREAMBLE, 0, Protocol.PREAMBLE.length);
             lastWrittenNanos = System.nanoTime();
             while (state.get() != CLOSED) {
                 if (carry != null || !queue.isEmpty()) {
@@ -849,15 +873,25 @@ public final class Connection {
             terminate(new Termination(DisconnectReason.IO_ERROR, e));
             failInFlight(e);
         } finally {
-            writeBuffer = null;
+            releaseWriteBuffer();
             failQueued();
             writerDone.countDown();
         }
     }
 
+    /**
+     * Encodes queued messages into the write buffer and writes them with one socket write. Each batch is appended after
+     * the previous one, so a single encoder serves many batches; it starts again at the beginning of the buffer only
+     * when the buffer is full (an encoder can't be rewound).
+     */
     private void writeBatch(OutputStream out) throws IOException {
-        byte[] buffer = writeBuffer != null ? writeBuffer : new byte[Math.min(INITIAL_BUFFER_SIZE, config.writeBufferSize)];
-        int length = 0;
+        byte[] buffer = writeBuffer;
+        if (buffer == null) {
+            buffer = new byte[Math.min(INITIAL_BUFFER_SIZE, config.writeBufferSize)];
+            encoder = null;
+        }
+        int start = encoder != null ? encoderPosition() : 0;
+        int end = start;
         Object item;
         // Poll, never peek then poll: DROP_OLDEST senders poll the queue too
         while ((item = takeNext()) != null) {
@@ -866,35 +900,44 @@ public final class Connection {
             inFlight.add(item);
             int size = sizeOf(item);
             inFlightBytes += size;
-            if (length + size > buffer.length) {
-                if (length > 0) {
+            if (end + size > buffer.length) {
+                if (end > start) {
                     removeLastInFlight(size);
                     carry = item;
-                    growWriteBuffer = buffer.length < config.writeBufferSize;
+                    growWriteBuffer = start == 0 && buffer.length < config.writeBufferSize;   // a whole buffer wasn't enough
                     break;
                 }
-                // The first message doesn't fit: an oversized one gets a buffer of its own, released after the write
-                buffer = new byte[size > config.writeBufferSize ? size : Math.max(size, nextWriteBufferSize(buffer.length))];
-            }
-            if (item instanceof EncodedFrame frame) {
-                System.arraycopy(frame.frame(), 0, buffer, length, size);
-            } else {
-                MessageLite message = (MessageLite) item;
-                try {
-                    ProtobufSerializer.serializeInto(message, ByteBuffer.wrap(buffer, length, size));
-                } catch (RuntimeException e) {
-                    removeLastInFlight(size);
-                    release(size);
-                    if (handshakeSucceeded()) {
-                        notifySendFailure(message, new SendException(SendException.Reason.WRITE_FAILED, e));
-                    }
-                    continue;
+                if (size > buffer.length) {
+                    // An oversized message gets a buffer of its own, released after the write
+                    buffer = new byte[size > config.writeBufferSize ? size : Math.max(size, nextWriteBufferSize(buffer.length))];
                 }
+                start = 0;   // back to the beginning of the buffer
+                end = 0;
+                encoder = null;
             }
-            length += size;
+            if (encoder == null) {
+                encoder = CodedOutputStream.newInstance(buffer, end, buffer.length - end);
+                encoderBase = end;
+            }
+            try {
+                if (item instanceof EncodedFrame frame) {
+                    encoder.writeRawBytes(frame.frame());
+                } else {
+                    ProtobufSerializer.writeFrame(encoder, (MessageLite) item, size);
+                }
+            } catch (IOException | RuntimeException e) {
+                encoder = null;   // its position is past a partial frame: start again at this message's offset
+                removeLastInFlight(size);
+                release(size);
+                if (handshakeSucceeded()) {
+                    notifySendFailure(messageOf(item), new SendException(SendException.Reason.WRITE_FAILED, e));
+                }
+                continue;
+            }
+            end += size;
         }
-        if (length > 0) {
-            timedWrite(out, buffer, length);
+        if (end > start) {
+            timedWrite(out, buffer, start, end - start);
             int count = inFlight.size();
             inFlight.clear();
             messagesWritten += count;
@@ -906,12 +949,23 @@ public final class Connection {
         }
         wakeBlockedSenders();
         if (buffer.length > config.writeBufferSize) {
-            buffer = null;
+            releaseWriteBuffer();
         } else if (growWriteBuffer) {
-            buffer = new byte[nextWriteBufferSize(buffer.length)];
+            writeBuffer = new byte[nextWriteBufferSize(buffer.length)];
+            encoder = null;
             growWriteBuffer = false;
+        } else {
+            writeBuffer = buffer;
         }
-        writeBuffer = buffer;
+    }
+
+    private int encoderPosition() {
+        return encoderBase + encoder.getTotalBytesWritten();
+    }
+
+    private void releaseWriteBuffer() {
+        writeBuffer = null;
+        encoder = null;   // it references the buffer
     }
 
     private void removeLastInFlight(int size) {
@@ -939,7 +993,7 @@ public final class Connection {
         if (config.heartbeatIntervalNanos > 0) {
             long untilHeartbeat = lastWrittenNanos + config.heartbeatIntervalNanos - now;
             if (untilHeartbeat <= 0) {
-                timedWrite(out, Protocol.HEARTBEAT_FRAME, Protocol.HEARTBEAT_FRAME.length);
+                timedWrite(out, Protocol.HEARTBEAT_FRAME, 0, Protocol.HEARTBEAT_FRAME.length);
                 lastWrittenNanos = System.nanoTime();
                 return;
             }
@@ -948,7 +1002,7 @@ public final class Connection {
         if (writeBuffer != null) {
             long untilShrink = lastBatchNanos + config.idleShrinkDelayNanos - now;
             if (untilShrink <= 0) {
-                writeBuffer = null;
+                releaseWriteBuffer();
                 inFlight.trimToSize();
             } else {
                 wait = Math.min(wait, untilShrink);
@@ -969,11 +1023,11 @@ public final class Connection {
         }
     }
 
-    private void timedWrite(OutputStream out, byte[] bytes, int length) throws IOException {
+    private void timedWrite(OutputStream out, byte[] bytes, int offset, int length) throws IOException {
         writeStartedNanos = System.nanoTime();
         writing = true;
         try {
-            out.write(bytes, 0, length);
+            out.write(bytes, offset, length);
         } finally {
             writing = false;
         }
@@ -1064,6 +1118,20 @@ public final class Connection {
             listener.onMessage(message);
         } catch (Throwable t) {
             LOG.warn("{}: onMessage threw for a {}", this, message.getClass().getName(), t);
+        }
+    }
+
+    private void notifyRawMessage(ConnectionConfig.RawHandler raw, byte[] buffer, int offset, int length) {
+        ByteBuffer view = rawView;
+        if (view == null || view.array() != buffer) {
+            view = ByteBuffer.wrap(buffer);
+            rawView = view;
+        }
+        view.clear().limit(offset + length).position(offset);
+        try {
+            listener.onRawMessage(raw.handler(), view);
+        } catch (Throwable t) {
+            LOG.warn("{}: raw handler threw for a {}", this, raw.typeName(), t);
         }
     }
 

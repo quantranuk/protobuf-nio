@@ -334,6 +334,91 @@ public class ConnectionTest {
     }
 
     @Test
+    public void rawHandlerGetsThePayloadInsteadOfOnMessage() throws Exception {
+        Object handler = new Object();
+        // The raw type is accepted although the allowlist doesn't list it
+        RawPeer peer = rawPeer(config().allowedMessageTypes(HeartBeatResponse.class).rawHandler(HeartBeatRequest.class, handler));
+        peer.out.write(Protocol.PREAMBLE);
+        HeartBeatResponse response = HeartBeatResponse.newBuilder().setRequestTimeMillis(7).build();
+        for (int i = 0; i < 100; i++) {
+            peer.out.write(ProtobufSerializer.serialize(request("raw " + i)));
+            peer.out.write(ProtobufSerializer.serialize(response));
+        }
+        peer.out.write(ProtobufSerializer.serialize(request("")));   // empty payload
+        for (int i = 0; i < 100; i++) {
+            Raw raw = peer.events.raws.poll(5, TimeUnit.SECONDS);
+            assertSame(handler, raw.handler);
+            assertEquals(request("raw " + i), HeartBeatRequest.parseFrom(raw.payload));
+            assertEquals(response, peer.events.messages.poll(5, TimeUnit.SECONDS));
+        }
+        assertEquals(0, peer.events.raws.poll(5, TimeUnit.SECONDS).payload.length);
+        assertTrue(peer.events.messages.isEmpty());
+        assertTrue(peer.events.views.size() <= 2, "Views not reused: " + peer.events.views.size());   // one per read buffer
+        assertTrue(peer.connection.isOpen());
+    }
+
+    @Test
+    public void rawHandlerRegistrationIsValidated() {
+        ConnectionConfig.Builder builder = config().rawHandler(HeartBeatRequest.class, new Object());
+        assertThrows(IllegalArgumentException.class, () -> builder.rawHandler(HeartBeatRequest.class, new Object()));
+        assertThrows(IllegalArgumentException.class, () -> builder.rawHandler(MessageLite.class, new Object()));
+        assertThrows(NullPointerException.class, () -> builder.rawHandler(HeartBeatResponse.class, null));
+    }
+
+    @ParameterizedTest
+    @MethodSource("brokenMessages")
+    public void aMessageThatFailsToEncodeFailsAloneAndTheBatchCarriesOn(String description, MessageLite broken) throws Exception {
+        Pair pair = connect(config(), config());
+        Connection client = pair.client.connection;
+        for (int round = 0; round < 50; round++) {   // most rounds land in one batch
+            assertTrue(client.send(request(2L * round)));
+            assertTrue(client.send(broken));
+            assertTrue(client.send(request(2L * round + 1)));
+        }
+        for (long i = 0; i < 100; i++) {
+            assertEquals(request(i), pair.server.events.messages.poll(5, TimeUnit.SECONDS));
+        }
+        for (int round = 0; round < 50; round++) {
+            Failure failure = pair.client.events.failures.poll(5, TimeUnit.SECONDS);
+            assertSame(broken, failure.message);
+            assertEquals(SendException.Reason.WRITE_FAILED, failure.cause.reason());
+        }
+        assertTrue(client.isOpen());
+        assertEquals(0, client.pendingMessages());
+        assertEquals(0, client.pendingBytes());
+    }
+
+    static Stream<Arguments> brokenMessages() {
+        return Stream.of(
+                Arguments.of("throws while encoding", brokenMessage(20, out -> {
+                    out.writeRawByte(1);
+                    throw new IllegalStateException("boom (expected by the test)");
+                })),
+                Arguments.of("encodes fewer bytes than its size", brokenMessage(20, out -> out.writeRawBytes(new byte[3]))),
+                Arguments.of("encodes more bytes than its size", brokenMessage(3, out -> out.writeRawBytes(new byte[20]))));
+    }
+
+    private interface Encoding {
+        void writeTo(com.google.protobuf.CodedOutputStream out) throws IOException;
+    }
+
+    /** A MessageLite that reports {@code size} but encodes as {@code encoding} says. */
+    private static MessageLite brokenMessage(int size, Encoding encoding) {
+        return (MessageLite) java.lang.reflect.Proxy.newProxyInstance(ConnectionTest.class.getClassLoader(), new Class<?>[]{MessageLite.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getSerializedSize" -> size;
+                    case "writeTo" -> {
+                        encoding.writeTo((com.google.protobuf.CodedOutputStream) args[0]);
+                        yield null;
+                    }
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "BrokenMessage";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    @Test
     public void heartbeatFramesNeverReachTheListener() throws Exception {
         RawPeer peer = rawPeer(config());
         peer.out.write(Protocol.PREAMBLE);
@@ -985,6 +1070,9 @@ public class ConnectionTest {
     private record Failure(MessageLite message, SendException cause, Thread thread) {
     }
 
+    private record Raw(Object handler, byte[] payload) {
+    }
+
     private static final class Recorder implements ConnectionListener {
         volatile Connection connection;
         volatile BiConsumer<Connection, MessageLite> onMessage = (connection, message) -> { };
@@ -994,6 +1082,8 @@ public class ConnectionTest {
         final AtomicInteger lateFailures = new AtomicInteger();   // onSendFailure after onDisconnected
         final BlockingQueue<MessageLite> messages = new LinkedBlockingQueue<>();
         final BlockingQueue<Failure> failures = new LinkedBlockingQueue<>();
+        final BlockingQueue<Raw> raws = new LinkedBlockingQueue<>();
+        final java.util.Set<ByteBuffer> views = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
         final BlockingQueue<Disconnect> disconnects = new LinkedBlockingQueue<>();
         final List<String> calls = new CopyOnWriteArrayList<>();   // connected, failure, disconnected (not messages)
 
@@ -1008,6 +1098,14 @@ public class ConnectionTest {
         public void onMessage(MessageLite message) {
             messages.add(message);
             onMessage.accept(connection, message);
+        }
+
+        @Override
+        public void onRawMessage(Object handler, ByteBuffer payload) {
+            views.add(payload);
+            byte[] copy = new byte[payload.remaining()];
+            payload.get(copy);
+            raws.add(new Raw(handler, copy));
         }
 
         @Override

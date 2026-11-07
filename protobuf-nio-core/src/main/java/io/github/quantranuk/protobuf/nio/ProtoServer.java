@@ -94,6 +94,18 @@ public interface ProtoServer extends AutoCloseable {
             return this;
         }
 
+        /**
+         * Optional low-garbage path: messages of this type skip parsing and go to {@code handler} with their raw
+         * bytes, instead of the listener's {@code onMessage}. The type is always accepted, even when
+         * {@link #allowedMessageTypes} doesn't list it.
+         * @throws IllegalArgumentException if the type already has a raw handler, or isn't a generated protobuf message
+         *                                  class
+         */
+        public Builder rawHandler(Class<? extends MessageLite> type, ProtoServerListener.RawMessageHandler handler) {
+            config.rawHandler(type, handler);
+            return this;
+        }
+
         /** Pending connections the operating system may queue. Default 1024. */
         public Builder backlog(int backlog) {
             if (backlog < 1) {

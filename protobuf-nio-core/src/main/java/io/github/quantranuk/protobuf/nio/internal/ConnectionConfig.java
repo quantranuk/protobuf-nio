@@ -41,6 +41,8 @@ public final class ConnectionConfig {
     final Map<SocketOption<?>, Object> socketOptions;
     // Allowed message types: read-only buffer of the ISO-8859-1 class name -> parser; null = any protobuf class
     final Map<ByteBuffer, Parser<? extends MessageLite>> allowedTypes;
+    // Raw handlers: read-only buffer of the ISO-8859-1 class name -> handler; always allowed
+    final Map<ByteBuffer, RawHandler> rawHandlers;
     final ClassLoader classLoader;
     final ThreadFactory threadFactory;   // null = a named virtual thread per reader and writer
 
@@ -60,8 +62,13 @@ public final class ConnectionConfig {
         sendTimeoutNanos = b.sendTimeout.toNanos();
         socketOptions = Collections.unmodifiableMap(new LinkedHashMap<>(b.socketOptions));
         allowedTypes = b.allowedTypes;
+        rawHandlers = Map.copyOf(b.rawHandlers);
         classLoader = b.classLoader != null ? b.classLoader : defaultClassLoader();
         threadFactory = b.threadFactory;
+    }
+
+    /** A raw handler registered for one message type; the handler is the public API's, passed back as is. */
+    record RawHandler(String typeName, Object handler) {
     }
 
     public static Builder builder() {
@@ -90,6 +97,7 @@ public final class ConnectionConfig {
         private Duration sendTimeout = Duration.ofSeconds(10);
         private final Map<SocketOption<?>, Object> socketOptions = new LinkedHashMap<>(Map.of(StandardSocketOptions.TCP_NODELAY, true));
         private Map<ByteBuffer, Parser<? extends MessageLite>> allowedTypes;
+        private final Map<ByteBuffer, RawHandler> rawHandlers = new HashMap<>();
         private ClassLoader classLoader;
         private ThreadFactory threadFactory;
 
@@ -196,17 +204,39 @@ public final class ConnectionConfig {
             }
             Map<ByteBuffer, Parser<? extends MessageLite>> allowed = new HashMap<>();
             for (Class<? extends MessageLite> type : types) {
-                Objects.requireNonNull(type, "type");
-                Parser<? extends MessageLite> parser;
-                try {
-                    parser = MessageTypes.parserOf(type);
-                } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
-                    throw new IllegalArgumentException("Not a generated protobuf message class: " + type.getName(), e);
-                }
-                allowed.put(ByteBuffer.wrap(type.getName().getBytes(ProtobufSerializer.CHARSET)).asReadOnlyBuffer(), parser);
+                allowed.put(encodedName(type), parserOf(type));
             }
             allowedTypes = Map.copyOf(allowed);
             return this;
+        }
+
+        /**
+         * Messages of this type skip parsing and go to {@code handler} (through
+         * {@link ConnectionListener#onRawMessage}) instead of {@code onMessage}. The type is always allowed.
+         * @throws IllegalArgumentException if the type already has a raw handler or isn't a generated message class
+         */
+        public Builder rawHandler(Class<? extends MessageLite> type, Object handler) {
+            Objects.requireNonNull(handler, "handler");
+            parserOf(type);   // validates the type
+            ByteBuffer name = encodedName(type);
+            if (rawHandlers.containsKey(name)) {
+                throw new IllegalArgumentException("A raw handler is already registered for " + type.getName());
+            }
+            rawHandlers.put(name, new RawHandler(type.getName(), handler));
+            return this;
+        }
+
+        private static ByteBuffer encodedName(Class<?> type) {
+            return ByteBuffer.wrap(type.getName().getBytes(ProtobufSerializer.CHARSET)).asReadOnlyBuffer();
+        }
+
+        private static Parser<? extends MessageLite> parserOf(Class<? extends MessageLite> type) {
+            Objects.requireNonNull(type, "type");
+            try {
+                return MessageTypes.parserOf(type);
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+                throw new IllegalArgumentException("Not a generated protobuf message class: " + type.getName(), e);
+            }
         }
 
         /** {@code null} = the thread's context class loader when {@link #build()} runs. */

@@ -3,6 +3,7 @@ package io.github.quantranuk.protobuf.nio;
 import io.github.quantranuk.protobuf.nio.internal.TypeDispatcher;
 import com.google.protobuf.MessageLite;
 
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -11,8 +12,8 @@ import java.util.function.Consumer;
 /**
  * Events of a {@link ProtoClient}. Every method is an optional no-op.
  * <ul>
- *     <li>Reader thread: {@link #onConnected}, {@link #onMessage}, {@link #onDisconnected}, in that order and never
- *     overlapping.</li>
+ *     <li>Reader thread: {@link #onConnected}, {@link #onMessage} and raw handlers, {@link #onDisconnected}, in that
+ *     order and never overlapping.</li>
  *     <li>Writer thread: {@link #onSendFailure}, except {@code REJECTED} and {@code DROPPED}, which run on the thread
  *     that called {@code send()}.</li>
  *     <li>{@link #onDisconnected} is the last callback, exactly once, after every {@link #onSendFailure}.</li>
@@ -124,6 +125,23 @@ public interface ProtoClientListener {
     @FunctionalInterface
     interface SendFailureHandler {
         void onSendFailure(ProtoClient client, MessageLite message, SendException cause);
+    }
+
+    /**
+     * Optional low-garbage path for one message type, registered with {@code ProtoClient.Builder.rawHandler}:
+     * messages of that type skip parsing and never reach {@code onMessage}.
+     */
+    @FunctionalInterface
+    interface RawMessageHandler {
+        /**
+         * Reader thread, like {@code onMessage}.
+         * @param payload the unparsed protobuf bytes, from its position to its limit. To avoid allocating per message,
+         *                it's a view over the read buffer that's reused: it's valid only during the call, and its
+         *                bytes mustn't be modified. It's a heap buffer, so {@code payload.array()},
+         *                {@code arrayOffset() + position()} and {@code remaining()} give the bytes without copying,
+         *                for example to parse into a reused builder. Copy what you need to keep.
+         */
+        void onMessage(ProtoClient client, ByteBuffer payload);
     }
 
     @FunctionalInterface

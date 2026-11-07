@@ -2,7 +2,7 @@
 
 # protobuf-nio
 
-> **`master` is being rewritten for 2.0** (virtual threads, a new API, TLS). The new `ProtoClient` / `ProtoServer` API works but is still incomplete (no TLS or raw handlers yet). Apart from the wire format section, this README still describes 1.x, whose last version is tagged [`1.x-final`](https://github.com/quantranuk/protobuf-nio/tree/1.x-final). It will be rewritten when 2.0 is ready.
+> **`master` is being rewritten for 2.0** (virtual threads, a new API, TLS). The new `ProtoClient` / `ProtoServer` API works but is still incomplete (no TLS yet). Apart from the wire format section, this README still describes 1.x, whose last version is tagged [`1.x-final`](https://github.com/quantranuk/protobuf-nio/tree/1.x-final). It will be rewritten when 2.0 is ready.
 
 A small Java library for sending and receiving [Protocol Buffers](https://protobuf.dev/) messages over TCP, built directly on Java NIO asynchronous sockets (`java.nio.channels.Asynchronous*`). It has no Netty or Mina dependency.
 

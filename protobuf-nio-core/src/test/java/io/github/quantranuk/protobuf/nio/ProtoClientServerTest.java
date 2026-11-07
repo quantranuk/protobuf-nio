@@ -540,6 +540,38 @@ public class ProtoClientServerTest {
     }
 
     @Test
+    public void rawHandlersReplaceOnMessageForTheirType() throws Exception {
+        BlockingQueue<Object> received = new LinkedBlockingQueue<>();
+        ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
+                .rawHandler(HeartBeatRequest.class, (connection, payload) -> {
+                    try {
+                        received.add(HeartBeatRequest.parseFrom(payload));
+                    } catch (IOException e) {
+                        received.add(e);
+                    }
+                })
+                .listener(ProtoServerListener.builder()
+                        .onMessage(HeartBeatRequest.class, (connection, message) -> received.add("onMessage called"))
+                        .onOtherMessage((connection, message) -> received.add(message))
+                        .build()));
+        BlockingQueue<Object> clientReceived = new LinkedBlockingQueue<>();
+        ProtoClient client = track(ProtoClient.builder("localhost", server.localAddress().getPort())
+                .rawHandler(HeartBeatResponse.class, (c, payload) -> clientReceived.add(payload.remaining()))
+                .build());
+        client.connect();
+        HeartBeatResponse response = HeartBeatResponse.newBuilder().setRequestTimeMillis(5).build();
+        client.send(request(1));
+        client.send(response);
+        assertEquals(request(1), received.poll(5, TimeUnit.SECONDS));
+        assertEquals(response, received.poll(5, TimeUnit.SECONDS));
+        server.broadcast(response);
+        assertEquals(response.getSerializedSize(), clientReceived.poll(5, TimeUnit.SECONDS));
+        assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0)
+                .rawHandler(HeartBeatRequest.class, (c, p) -> { })
+                .rawHandler(HeartBeatRequest.class, (c, p) -> { }));
+    }
+
+    @Test
     public void clientBuilderIsReusable() throws Exception {
         ProtoServer server = startServer(ProtoServerListener.builder());
         ProtoClient.Builder builder = ProtoClient.builder(server.localAddress());

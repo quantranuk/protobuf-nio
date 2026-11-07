@@ -75,6 +75,28 @@ public final class ProtobufSerializer {
     }
 
     /**
+     * Writes a frame through an encoder that the caller reuses for a whole batch (no allocation per message).
+     * @param out          an encoder over the batch buffer, with at least {@code expectedSize} bytes of space left
+     * @param message      the protobuf message
+     * @param expectedSize {@link #getSerializedSize(MessageLite)} of the message, computed when it was queued
+     * @throws IOException           if the message no longer fits (its size grew after it was queued)
+     * @throws IllegalStateException if it wrote a different number of bytes; the encoder must then be discarded
+     */
+    static void writeFrame(CodedOutputStream out, MessageLite message, int expectedSize) throws IOException {
+        int start = out.getTotalBytesWritten();
+        byte[] encodedClassName = ENCODED_CLASS_NAMES.get(message.getClass());
+        // Big-endian header ints: fixed32 is little-endian, so reverse the bytes
+        out.writeFixed32NoTag(Integer.reverseBytes(SIGNATURE));
+        out.writeFixed32NoTag(Integer.reverseBytes(encodedClassName.length));
+        out.writeFixed32NoTag(Integer.reverseBytes(message.getSerializedSize()));
+        out.writeRawBytes(encodedClassName);
+        message.writeTo(out);
+        if (out.getTotalBytesWritten() - start != expectedSize) {
+            throw new IllegalStateException("Serialized size of " + message.getClass().getName() + " changed after it was queued");
+        }
+    }
+
+    /**
      * @param message the protobuf message
      * @return the size of the whole frame in bytes, header included
      */

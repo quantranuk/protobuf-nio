@@ -7,6 +7,7 @@ import io.github.quantranuk.protobuf.nio.SendException;
 import com.google.protobuf.MessageLite;
 
 import javax.net.ssl.SSLSession;
+import java.nio.ByteBuffer;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 
@@ -108,6 +109,11 @@ final class DefaultProtoConnection implements ProtoConnection {
         @Override
         public void onMessage(MessageLite message) {
             listener.onMessage(DefaultProtoConnection.this, message);
+        }
+
+        @Override
+        public void onRawMessage(Object handler, ByteBuffer payload) {
+            ((ProtoServerListener.RawMessageHandler) handler).onMessage(DefaultProtoConnection.this, payload);
         }
 
         @Override
