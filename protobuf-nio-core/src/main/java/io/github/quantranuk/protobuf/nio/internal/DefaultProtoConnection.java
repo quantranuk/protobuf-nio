@@ -90,7 +90,7 @@ final class DefaultProtoConnection implements ProtoConnection {
     }
 
     boolean isOwnThread() {
-        return connection.isReaderThread() || connection.isWriterThread();
+        return connection.isListenerThread();
     }
 
     @Override

@@ -13,7 +13,8 @@ import java.util.function.Consumer;
  * <ul>
  *     <li>Reader thread of each connection: {@link #onConnected}, {@link #onMessage}, {@link #onDisconnected}, in that
  *     order and never overlapping for one connection.</li>
- *     <li>Writer thread of each connection: {@link #onSendFailure}.</li>
+ *     <li>Writer thread of each connection: {@link #onSendFailure}, except {@code REJECTED} and {@code DROPPED}, which
+ *     run on the thread that called {@code send()} or {@code broadcast()}.</li>
  *     <li>{@link #onDisconnected} is a connection's last callback, exactly once, after every {@link #onSendFailure}.</li>
  *     <li>A connection whose handshake fails is never reported.</li>
  * </ul>

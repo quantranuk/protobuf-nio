@@ -26,10 +26,17 @@ public interface ProtoConnection extends AutoCloseable {
     SSLSession tlsSession();
 
     /**
-     * Queues the message. Thread-safe and non-blocking; messages from one thread are sent in order.
-     * Every message queued is either written or reported to {@code onSendFailure}.
+     * Queues the message. Thread-safe; messages from one thread are sent in order.
+     * When the queue is full ({@code maxPendingMessages} or {@code maxPendingBytes}), the {@link OverflowPolicy}
+     * decides: {@code BLOCK} waits up to {@code sendTimeout} for room, except on this connection's writer thread (that is,
+     * from {@code onSendFailure}), where it rejects at once.
+     * Until closing starts, every message passed to send is either written or reported to {@code onSendFailure}: when
+     * this returns false because the queue is full, {@code onSendFailure(REJECTED)} has already run on the calling
+     * thread, and {@code DROP_OLDEST} reports what it drops as {@code DROPPED}, also on the calling thread.
+     * Once closing has started, send returns false without calling the listener ({@code onDisconnected} stays last).
      *
-     * @return true if queued; false if the connection is closing or closed (the listener isn't called)
+     * @return true if queued; false if not (queue full, or closing or closed). If interrupted while waiting for room,
+     *         returns false with the interrupt flag kept.
      */
     boolean send(MessageLite message);
 

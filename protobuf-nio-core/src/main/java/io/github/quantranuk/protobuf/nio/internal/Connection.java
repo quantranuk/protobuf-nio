@@ -80,7 +80,12 @@ public final class Connection {
 
     private static final Termination CLOSED_LOCALLY = new Termination(DisconnectReason.CLOSED_LOCALLY, null);
     private static final Termination CLOSED_BY_PEER = new Termination(DisconnectReason.CLOSED_BY_PEER, null);
+    private static final Termination QUEUE_OVERFLOW = new Termination(DisconnectReason.SEND_QUEUE_OVERFLOW, null);
     private static final SendException CLOSED_FAILURE = new SendException(SendException.Reason.CLOSED, null);
+    private static final SendException REJECTED_FAILURE = new SendException(SendException.Reason.REJECTED, null);
+    private static final SendException DROPPED_FAILURE = new SendException(SendException.Reason.DROPPED, null);
+    /** Bound while a sending thread reports REJECTED or DROPPED, so it counts as one of this connection's listener threads. */
+    private static final ScopedValue<Connection> REPORTING = ScopedValue.newInstance();
 
     private final long id;
     private final Socket socket;
@@ -101,6 +106,9 @@ public final class Connection {
     private final ConcurrentLinkedQueue<Object> queue = new ConcurrentLinkedQueue<>();
     private final AtomicInteger pendingMessages = new AtomicInteger();
     private final AtomicLong pendingBytes = new AtomicLong();
+    // Senders that found the queue full and haven't returned yet; the writer wakes blocked ones after each batch
+    private final AtomicInteger overflowing = new AtomicInteger();
+    private final Object roomLock = new Object();
     private volatile boolean writerParked;
     private volatile long messagesWritten;
 
@@ -127,6 +135,7 @@ public final class Connection {
     private byte[] writeBuffer;
     private boolean growWriteBuffer;
     private final ArrayList<Object> inFlight = new ArrayList<>();
+    private Object carry;   // taken from the queue but didn't fit in the last batch
     private long inFlightBytes;
     private long lastWrittenNanos;
     private long lastBatchNanos;
@@ -238,12 +247,25 @@ public final class Connection {
         return Thread.currentThread() == reader;
     }
 
+    /**
+     * @return true on this connection's reader or writer thread, or on a sending thread while it reports
+     *         {@code REJECTED} or {@code DROPPED}: threads that mustn't wait for this connection to close
+     */
+    public boolean isListenerThread() {
+        return isReaderThread() || isWriterThread() || (REPORTING.isBound() && REPORTING.get() == this);
+    }
+
     public int pendingMessages() {
         return pendingMessages.get();
     }
 
     public long pendingBytes() {
         return pendingBytes.get();
+    }
+
+    /** Messages in the queue, not counting those the writer has taken. O(n): for tests. */
+    int queuedMessages() {
+        return queue.size();
     }
 
     /** Messages written to the socket so far. */
@@ -254,30 +276,188 @@ public final class Connection {
     /**
      * Queues a message. Thread-safe; messages from one thread are written in order. Messages sent during the handshake
      * are written after this side's preamble.
-     * @return false if the connection is closing or closed
+     * <p>
+     * The queue holds at most {@code maxPendingMessages} messages and {@code maxPendingBytes} encoded bytes (a larger
+     * message is queued only when nothing else is pending). When it's full, the overflow policy decides:
+     * <ul>
+     * <li>{@code BLOCK} waits up to the send timeout for room. It doesn't wait on the writer thread, which is the one
+     *     that makes room.</li>
+     * <li>{@code REJECT} returns false.</li>
+     * <li>{@code DROP_OLDEST} drops queued messages, oldest first, until the message fits, and reports each as
+     *     {@code DROPPED}. If there's nothing left to drop (what's pending is being written), it rejects.</li>
+     * <li>{@code DISCONNECT} rejects, then closes the connection at once with {@code SEND_QUEUE_OVERFLOW}.</li>
+     * </ul>
+     * A rejected message is reported as {@code REJECTED} before this returns false. Both reports run on the calling
+     * thread, and only while the connection is open: during the handshake, a full queue makes send return false (and
+     * {@code DROP_OLDEST} rejects rather than drops), and once closing has started send returns false without reports.
+     *
+     * @return true if queued; false if not. If interrupted while waiting, returns false with the interrupt flag kept.
      */
     public boolean send(MessageLite message) {
         Objects.requireNonNull(message, "message");
-        return enqueue(message, ProtobufSerializer.getSerializedSize(message));
+        return enqueue(message, ProtobufSerializer.getSerializedSize(message), true);
     }
 
-    /** Same as {@link #send(MessageLite)}, for a message encoded once for several connections. */
+    /**
+     * Same as {@link #send(MessageLite)}, for a message encoded once for several connections, except that it never
+     * blocks: under {@code BLOCK}, a full queue rejects the message as under {@code REJECT}.
+     */
     public boolean send(EncodedFrame frame) {
-        return enqueue(frame, frame.frame().length);
+        return enqueue(frame, frame.frame().length, false);
     }
 
-    private boolean enqueue(Object item, int size) {
-        int s = state.get();
-        if (s != OPEN && s != HANDSHAKING) {
+    private boolean enqueue(Object item, int size, boolean mayBlock) {
+        if (!acceptingSends()) {
             return false;
         }
-        pendingMessages.incrementAndGet();
-        pendingBytes.addAndGet(size);
+        if (!tryReserve(size)) {
+            return onQueueFull(item, size, mayBlock);
+        }
+        return offer(item, size);
+    }
+
+    private boolean acceptingSends() {
+        int s = state.get();
+        return s == OPEN || s == HANDSHAKING;
+    }
+
+    /** Reserves room for one message. @return false if the queue is full */
+    private boolean tryReserve(int size) {
+        int count;
+        do {
+            count = pendingMessages.get();
+            if (count >= config.maxPendingMessages) {
+                return false;
+            }
+        } while (!pendingMessages.compareAndSet(count, count + 1));
+        long bytes;
+        do {
+            bytes = pendingBytes.get();
+            if (bytes > 0 && bytes + size > config.maxPendingBytes) {
+                pendingMessages.decrementAndGet();
+                return false;
+            }
+        } while (!pendingBytes.compareAndSet(bytes, bytes + size));
+        return true;
+    }
+
+    private void release(int size) {
+        pendingMessages.decrementAndGet();
+        pendingBytes.addAndGet(-size);
+    }
+
+    /**
+     * Queues a message whose room is reserved. The state is checked after reserving: {@link #finish} waits until every
+     * reservation is released or queued, so a message that races with closing is never stranded in the queue.
+     */
+    private boolean offer(Object item, int size) {
+        if (!acceptingSends()) {
+            release(size);
+            return false;
+        }
         queue.offer(item);
         if (writerParked) {
             LockSupport.unpark(writer);
         }
         return true;
+    }
+
+    private boolean onQueueFull(Object item, int size, boolean mayBlock) {
+        overflowing.incrementAndGet();   // finish() waits for this to drop to zero, so onDisconnected stays last
+        try {
+            switch (config.overflowPolicy) {
+                case BLOCK -> {
+                    if (mayBlock && config.sendTimeoutNanos > 0 && !isWriterThread() && awaitRoom(size)) {
+                        return offer(item, size);
+                    }
+                }
+                case DROP_OLDEST -> {
+                    if (dropOldest(size)) {
+                        return offer(item, size);
+                    }
+                }
+                case DISCONNECT -> {
+                    reportRejected(messageOf(item));
+                    terminate(QUEUE_OVERFLOW);
+                    return false;
+                }
+                case REJECT -> {
+                }
+            }
+            reportRejected(messageOf(item));
+            return false;
+        } finally {
+            overflowing.decrementAndGet();
+        }
+    }
+
+    /**
+     * Waits up to the send timeout for room, woken by the writer after each batch and by closing.
+     * @return true once room is reserved; false if closing started, the wait timed out or the thread was interrupted
+     *         (the interrupt flag is kept)
+     */
+    private boolean awaitRoom(int size) {
+        long deadline = System.nanoTime() + config.sendTimeoutNanos;
+        synchronized (roomLock) {
+            while (acceptingSends()) {
+                if (tryReserve(size)) {
+                    return true;
+                }
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    return false;
+                }
+                try {
+                    TimeUnit.NANOSECONDS.timedWait(roomLock, remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            return false;
+        }
+    }
+
+    /** Wakes senders waiting for room; called after room is made and when closing starts. */
+    private void wakeBlockedSenders() {
+        if (overflowing.get() > 0) {
+            synchronized (roomLock) {
+                roomLock.notifyAll();
+            }
+        }
+    }
+
+    /**
+     * Drops queued messages, oldest first, until the message fits. The writer only ever polls the queue, so a message
+     * is either dropped here or written, never both.
+     * @return true once room is reserved; false during the handshake, once closing has started, or if nothing is left
+     *         to drop
+     */
+    private boolean dropOldest(int size) {
+        do {
+            if (state.get() != OPEN) {
+                return false;
+            }
+            Object oldest = queue.poll();
+            if (oldest == null) {
+                return false;
+            }
+            release(sizeOf(oldest));
+            // Reported even if closing has just started: the message was accepted, so it can't vanish silently
+            reportFromSender(messageOf(oldest), DROPPED_FAILURE);
+        } while (!tryReserve(size));
+        return true;
+    }
+
+    /** Reports a rejected message, only while open: never during the handshake or once closing has started. */
+    private void reportRejected(MessageLite message) {
+        if (state.get() == OPEN) {
+            reportFromSender(message, REJECTED_FAILURE);
+        }
+    }
+
+    private void reportFromSender(MessageLite message, SendException failure) {
+        ScopedValue.where(REPORTING, this).run(() -> notifySendFailure(message, failure));
     }
 
     /**
@@ -298,6 +478,7 @@ public final class Connection {
             closeDeadlineNanos = System.nanoTime() + config.closeTimeoutNanos;
             closeDeadlineArmed = true;
             LockSupport.unpark(writer);
+            wakeBlockedSenders();
         } else {
             while (!closeDeadlineArmed && state.get() == CLOSING) {
                 Thread.onSpinWait();   // another thread is arming the deadline
@@ -324,7 +505,7 @@ public final class Connection {
         Termination t = termination.get();
         handshake.completeExceptionally(handshakeFailure(t));
         Watchdog.INSTANCE.unregister(this);
-        failQueued();
+        failQueuedAfterClose();
         closed.complete(t.reason());
     }
 
@@ -355,6 +536,7 @@ public final class Connection {
             }
             socketClosed.countDown();
             LockSupport.unpark(writer);
+            wakeBlockedSenders();
         }
     }
 
@@ -505,7 +687,7 @@ public final class Connection {
             }
             readStart = 0;
             readEnd = 0;
-        } else if (readStart + needed > capacity || capacity - readEnd < capacity / 8) {
+        } else if (readStart > 0 && (readStart + needed > capacity || capacity - readEnd < capacity / 8)) {
             replaceReadBuffer(buffer, pending);   // compact
         }
         while (true) {
@@ -606,7 +788,7 @@ public final class Connection {
             handshake.completeExceptionally(handshakeFailure(t));
         }
         awaitUninterruptibly(writerDone);
-        failQueued();   // messages that raced with closing
+        failQueuedAfterClose();
         Watchdog.INSTANCE.unregister(this);
         readBuffer = null;
         if (connected) {
@@ -637,7 +819,7 @@ public final class Connection {
             timedWrite(out, Protocol.PREAMBLE, Protocol.PREAMBLE.length);
             lastWrittenNanos = System.nanoTime();
             while (state.get() != CLOSED) {
-                if (!queue.isEmpty()) {
+                if (carry != null || !queue.isEmpty()) {
                     writeBatch(out);
                 } else if (state.get() == CLOSING) {
                     socket.shutdownOutput();   // flushed: send FIN, the reader waits for the peer's
@@ -660,17 +842,23 @@ public final class Connection {
         byte[] buffer = writeBuffer != null ? writeBuffer : new byte[Math.min(INITIAL_BUFFER_SIZE, config.writeBufferSize)];
         int length = 0;
         Object item;
-        while ((item = queue.peek()) != null) {
+        // Poll, never peek then poll: DROP_OLDEST senders poll the queue too
+        while ((item = takeNext()) != null) {
+            // In flight from here, so that failInFlight releases its room if anything below throws: the reader's
+            // finish() waits for the pending count to reach zero
+            inFlight.add(item);
             int size = sizeOf(item);
+            inFlightBytes += size;
             if (length + size > buffer.length) {
                 if (length > 0) {
+                    removeLastInFlight(size);
+                    carry = item;
                     growWriteBuffer = buffer.length < config.writeBufferSize;
                     break;
                 }
                 // The first message doesn't fit: an oversized one gets a buffer of its own, released after the write
                 buffer = new byte[size > config.writeBufferSize ? size : Math.max(size, nextWriteBufferSize(buffer.length))];
             }
-            queue.poll();
             if (item instanceof EncodedFrame frame) {
                 System.arraycopy(frame.frame(), 0, buffer, length, size);
             } else {
@@ -678,8 +866,8 @@ public final class Connection {
                 try {
                     ProtobufSerializer.serializeInto(message, ByteBuffer.wrap(buffer, length, size));
                 } catch (RuntimeException e) {
-                    pendingMessages.decrementAndGet();
-                    pendingBytes.addAndGet(-size);
+                    removeLastInFlight(size);
+                    release(size);
                     if (handshakeSucceeded()) {
                         notifySendFailure(message, new SendException(SendException.Reason.WRITE_FAILED, e));
                     }
@@ -687,8 +875,6 @@ public final class Connection {
                 }
             }
             length += size;
-            inFlightBytes += size;
-            inFlight.add(item);
         }
         if (length > 0) {
             timedWrite(out, buffer, length);
@@ -701,6 +887,7 @@ public final class Connection {
             lastWrittenNanos = System.nanoTime();
             lastBatchNanos = lastWrittenNanos;
         }
+        wakeBlockedSenders();
         if (buffer.length > config.writeBufferSize) {
             buffer = null;
         } else if (growWriteBuffer) {
@@ -708,6 +895,20 @@ public final class Connection {
             growWriteBuffer = false;
         }
         writeBuffer = buffer;
+    }
+
+    private void removeLastInFlight(int size) {
+        inFlight.removeLast();
+        inFlightBytes -= size;
+    }
+
+    private Object takeNext() {
+        Object item = carry;
+        if (item != null) {
+            carry = null;
+            return item;
+        }
+        return queue.poll();
     }
 
     private int nextWriteBufferSize(int current) {
@@ -778,20 +979,39 @@ public final class Connection {
         inFlightBytes = 0;
     }
 
-    /** Fails everything queued with CLOSED. Runs on the writer, then on the reader after the writer has finished. */
+    /**
+     * Fails everything queued with CLOSED. Runs on the writer (which owns {@code carry}), then on the reader after the
+     * writer has finished.
+     */
     private void failQueued() {
-        Object item = queue.poll();
-        if (item == null) {
+        Object item = carry;
+        carry = null;
+        if (item == null && (item = queue.poll()) == null) {
             return;
         }
         boolean report = handshakeSucceeded();
         do {
-            pendingMessages.decrementAndGet();
-            pendingBytes.addAndGet(-sizeOf(item));
+            release(sizeOf(item));
             if (report) {
                 notifySendFailure(messageOf(item), CLOSED_FAILURE);
             }
         } while ((item = queue.poll()) != null);
+    }
+
+    /**
+     * After the writer has finished: fails what's queued, including messages from senders that reserved room before
+     * closing started, and waits for senders still handling a full queue (their reports come before onDisconnected).
+     */
+    private void failQueuedAfterClose() {
+        failQueued();
+        for (int spins = 0; pendingMessages.get() > 0 || overflowing.get() > 0; spins++) {
+            if (spins < 100) {
+                Thread.yield();
+            } else {
+                LockSupport.parkNanos(100_000);
+            }
+            failQueued();
+        }
     }
 
     private static int sizeOf(Object item) {

@@ -48,7 +48,10 @@ public interface ProtoServer extends AutoCloseable {
     Collection<ProtoConnection> connections();
 
     /**
-     * Encodes the message once and queues it on every open connection. Never blocks.
+     * Encodes the message once and queues it on every open connection. Never blocks: under
+     * {@link OverflowPolicy#BLOCK}, a connection whose queue is full rejects the message as under
+     * {@link OverflowPolicy#REJECT}; {@code DROP_OLDEST} and {@code DISCONNECT} apply as usual. Rejections and drops are
+     * reported to {@code onSendFailure} on the calling thread.
      * @return the number of connections it was queued on
      */
     int broadcast(MessageLite message);
@@ -154,6 +157,33 @@ public interface ProtoServer extends AutoCloseable {
         /** Largest protobuf payload accepted from a client. Default 64 MiB. */
         public Builder maxMessageSize(int bytes) {
             config.maxMessageSize(bytes);
+            return this;
+        }
+
+        /**
+         * Most encoded bytes queued and not yet written, per connection. A single larger message is queued only when
+         * nothing else is pending. Default 64 MiB.
+         */
+        public Builder maxPendingBytes(long bytes) {
+            config.maxPendingBytes(bytes);
+            return this;
+        }
+
+        /** Most messages queued and not yet written, per connection. Default 1,000,000. */
+        public Builder maxPendingMessages(int messages) {
+            config.maxPendingMessages(messages);
+            return this;
+        }
+
+        /** What {@link ProtoConnection#send} does when a connection's queue is full. Default {@link OverflowPolicy#BLOCK}. */
+        public Builder overflowPolicy(OverflowPolicy policy) {
+            config.overflowPolicy(policy);
+            return this;
+        }
+
+        /** How long {@link OverflowPolicy#BLOCK} waits for room. {@link Duration#ZERO} = not at all. Default 10 s. */
+        public Builder sendTimeout(Duration timeout) {
+            config.sendTimeout(timeout);
             return this;
         }
 

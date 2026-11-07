@@ -75,12 +75,20 @@ public interface ProtoClient extends AutoCloseable {
     SSLSession tlsSession();
 
     /**
-     * Queues the message. Thread-safe and non-blocking; messages from one thread are sent in order. While
-     * {@code connect()} is running, messages are queued and sent after the preamble. Every message queued is either
-     * written or reported to {@code onSendFailure} (unless {@code connect()} fails, in which case no listener method is
-     * called).
+     * Queues the message. Thread-safe; messages from one thread are sent in order.
+     * When the queue is full ({@code maxPendingMessages} or {@code maxPendingBytes}), the {@link OverflowPolicy}
+     * decides: {@code BLOCK} waits up to {@code sendTimeout} for room, except on this client's writer thread (that is,
+     * from {@code onSendFailure}), where it rejects at once.
+     * Until closing starts, every message passed to send is either written or reported to {@code onSendFailure}: when
+     * this returns false because the queue is full, {@code onSendFailure(REJECTED)} has already run on the calling
+     * thread, and {@code DROP_OLDEST} reports what it drops as {@code DROPPED}, also on the calling thread.
+     * Once closing has started, send returns false without calling the listener ({@code onDisconnected} stays last).
+     * While {@code connect()} is running, messages are queued and sent after the preamble; if the queue fills up
+     * meanwhile, send returns false without calling the listener ({@code DROP_OLDEST} then rejects rather than drops),
+     * and if {@code connect()} fails, no listener method is called at all.
      *
-     * @return true if queued; false if the client is closing or closed (the listener isn't called)
+     * @return true if queued; false if not (queue full, or closing or closed). If interrupted while waiting for room,
+     *         returns false with the interrupt flag kept.
      * @throws IllegalStateException if {@code connect()} hasn't been called
      */
     boolean send(MessageLite message);
@@ -186,6 +194,33 @@ public interface ProtoClient extends AutoCloseable {
         /** Largest protobuf payload accepted from the peer, which is disconnected if it sends a larger one. Default 64 MiB. */
         public Builder maxMessageSize(int bytes) {
             config.maxMessageSize(bytes);
+            return this;
+        }
+
+        /**
+         * Most encoded bytes queued and not yet written. A single larger message is queued only when nothing else is
+         * pending. Default 64 MiB.
+         */
+        public Builder maxPendingBytes(long bytes) {
+            config.maxPendingBytes(bytes);
+            return this;
+        }
+
+        /** Most messages queued and not yet written. Default 1,000,000. */
+        public Builder maxPendingMessages(int messages) {
+            config.maxPendingMessages(messages);
+            return this;
+        }
+
+        /** What {@link ProtoClient#send} does when the queue is full. Default {@link OverflowPolicy#BLOCK}. */
+        public Builder overflowPolicy(OverflowPolicy policy) {
+            config.overflowPolicy(policy);
+            return this;
+        }
+
+        /** How long {@link OverflowPolicy#BLOCK} waits for room. {@link Duration#ZERO} = not at all. Default 10 s. */
+        public Builder sendTimeout(Duration timeout) {
+            config.sendTimeout(timeout);
             return this;
         }
 

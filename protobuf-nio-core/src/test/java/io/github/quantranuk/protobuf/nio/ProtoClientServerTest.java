@@ -15,6 +15,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.StandardSocketOptions;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -35,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -290,6 +292,85 @@ public class ProtoClientServerTest {
     }
 
     @Test
+    public void broadcastNeverBlocksAndReportsRejectionsOnTheCallingThread() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        BlockingQueue<Thread> rejectedOn = new LinkedBlockingQueue<>();
+        ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
+                .maxPendingMessages(4)
+                .sendTimeout(Duration.ofSeconds(30))   // BLOCK, the default policy, would wait this long in send()
+                .socketOption(StandardSocketOptions.SO_SNDBUF, 4096)
+                .listener(ProtoServerListener.builder()
+                        .onSendFailure((connection, message, cause) -> {
+                            assertEquals(SendException.Reason.REJECTED, cause.reason());
+                            rejectedOn.add(Thread.currentThread());
+                        })
+                        .build()));
+        AtomicInteger received = new AtomicInteger();
+        ProtoClient client = client(server, ProtoClientListener.builder().onOtherMessage((c, message) -> {
+            received.incrementAndGet();
+            await(gate);   // stops reading
+        }));
+        client.connect();
+        try {
+            awaitTrue(() -> server.connections().size() == 1);
+            HeartBeatRequest big = HeartBeatRequest.newBuilder().setRequestMessage("x".repeat(16 * 1024)).build();
+            int queued = 0;
+            int rejections = 0;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (rejections < 3) {
+                long start = System.nanoTime();
+                int n = server.broadcast(big);
+                assertTrue(System.nanoTime() - start < TimeUnit.SECONDS.toNanos(1), "broadcast blocked");
+                queued += n;
+                if (n == 0) {
+                    rejections++;
+                    assertSame(Thread.currentThread(), rejectedOn.poll(5, TimeUnit.SECONDS));
+                }
+                assertTrue(System.nanoTime() < deadline, "The queue never filled");
+            }
+            gate.countDown();
+            int expected = queued;
+            awaitTrue(() -> received.get() == expected);
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void clientQueueLimitsApply() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        AtomicInteger received = new AtomicInteger();
+        ProtoServer server = startServer(ProtoServerListener.builder().onOtherMessage((connection, message) -> {
+            received.incrementAndGet();
+            await(gate);   // stops reading
+        }));
+        BlockingQueue<SendException> failures = new LinkedBlockingQueue<>();
+        ProtoClient client = track(ProtoClient.builder("localhost", server.localAddress().getPort())
+                .overflowPolicy(OverflowPolicy.REJECT)
+                .maxPendingMessages(4)
+                .socketOption(StandardSocketOptions.SO_SNDBUF, 4096)
+                .listener(ProtoClientListener.builder().onSendFailure((c, message, cause) -> failures.add(cause)).build())
+                .build());
+        client.connect();
+        try {
+            HeartBeatRequest big = HeartBeatRequest.newBuilder().setRequestMessage("x".repeat(16 * 1024)).build();
+            int sent = 0;
+            while (client.send(big)) {
+                sent++;
+                assertTrue(client.pendingMessages() <= 4);
+                assertTrue(sent < 100_000, "Never full");
+            }
+            assertEquals(SendException.Reason.REJECTED, failures.poll(5, TimeUnit.SECONDS).reason());
+            gate.countDown();
+            int expected = sent;
+            awaitTrue(() -> received.get() == expected);
+            assertTrue(failures.isEmpty());
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
     public void serverCloseClosesEveryConnection() throws Exception {
         ProtoServer server = startServer(ProtoServerListener.builder());
         List<ProtoClient> clients = new ArrayList<>();
@@ -427,6 +508,14 @@ public class ProtoClientServerTest {
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).backlog(0));
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).maxConnections(0));
         assertThrows(NullPointerException.class, () -> ProtoServer.builder(0).listener(null));
+        assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).maxPendingBytes(0));
+        assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).maxPendingMessages(0));
+        assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).sendTimeout(Duration.ofMillis(-1)));
+        assertThrows(NullPointerException.class, () -> ProtoClient.builder("localhost", 1).overflowPolicy(null));
+        assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).maxPendingBytes(-1));
+        assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).maxPendingMessages(-1));
+        assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).sendTimeout(Duration.ofMillis(-1)));
+        assertThrows(NullPointerException.class, () -> ProtoServer.builder(0).overflowPolicy(null));
     }
 
     @Test
@@ -445,6 +534,22 @@ public class ProtoClientServerTest {
 
     private static HeartBeatRequest request(long i) {
         return HeartBeatRequest.newBuilder().setRequestTimeMillis(i).build();
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void awaitTrue(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() < deadline, "Condition not met within 10 s");
+            Thread.sleep(5);
+        }
     }
 
     private <T extends AutoCloseable> T track(T resource) {

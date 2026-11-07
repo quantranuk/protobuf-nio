@@ -13,7 +13,8 @@ import java.util.function.Consumer;
  * <ul>
  *     <li>Reader thread: {@link #onConnected}, {@link #onMessage}, {@link #onDisconnected}, in that order and never
  *     overlapping.</li>
- *     <li>Writer thread: {@link #onSendFailure}.</li>
+ *     <li>Writer thread: {@link #onSendFailure}, except {@code REJECTED} and {@code DROPPED}, which run on the thread
+ *     that called {@code send()}.</li>
  *     <li>{@link #onDisconnected} is the last callback, exactly once, after every {@link #onSendFailure}.</li>
  *     <li>If {@link ProtoClient#connect()} fails, no method is called.</li>
  * </ul>

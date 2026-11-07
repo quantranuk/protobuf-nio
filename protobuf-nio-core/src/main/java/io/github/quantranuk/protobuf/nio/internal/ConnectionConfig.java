@@ -1,5 +1,7 @@
 package io.github.quantranuk.protobuf.nio.internal;
 
+import io.github.quantranuk.protobuf.nio.OverflowPolicy;
+
 import java.net.SocketOption;
 import java.net.StandardSocketOptions;
 import java.time.Duration;
@@ -28,6 +30,10 @@ public final class ConnectionConfig {
     final int readBufferSize;
     final int writeBufferSize;
     final int maxMessageSize;
+    final long maxPendingBytes;
+    final int maxPendingMessages;
+    final OverflowPolicy overflowPolicy;
+    final long sendTimeoutNanos;
     final Map<SocketOption<?>, Object> socketOptions;
     final ClassLoader classLoader;
     final ThreadFactory threadFactory;   // null = a named virtual thread per reader and writer
@@ -42,6 +48,10 @@ public final class ConnectionConfig {
         readBufferSize = b.readBufferSize;
         writeBufferSize = b.writeBufferSize;
         maxMessageSize = b.maxMessageSize;
+        maxPendingBytes = b.maxPendingBytes;
+        maxPendingMessages = b.maxPendingMessages;
+        overflowPolicy = b.overflowPolicy;
+        sendTimeoutNanos = b.sendTimeout.toNanos();
         socketOptions = Collections.unmodifiableMap(new LinkedHashMap<>(b.socketOptions));
         classLoader = b.classLoader != null ? b.classLoader : defaultClassLoader();
         threadFactory = b.threadFactory;
@@ -67,6 +77,10 @@ public final class ConnectionConfig {
         private int readBufferSize = 64 * 1024;
         private int writeBufferSize = 64 * 1024;
         private int maxMessageSize = 64 * 1024 * 1024;
+        private long maxPendingBytes = 64L * 1024 * 1024;
+        private int maxPendingMessages = 1_000_000;
+        private OverflowPolicy overflowPolicy = OverflowPolicy.BLOCK;
+        private Duration sendTimeout = Duration.ofSeconds(10);
         private final Map<SocketOption<?>, Object> socketOptions = new LinkedHashMap<>(Map.of(StandardSocketOptions.TCP_NODELAY, true));
         private ClassLoader classLoader;
         private ThreadFactory threadFactory;
@@ -125,6 +139,32 @@ public final class ConnectionConfig {
                 throw new IllegalArgumentException("maxMessageSize must be between 0 and " + MAX_MESSAGE_SIZE_LIMIT + ": " + bytes);
             }
             maxMessageSize = bytes;
+            return this;
+        }
+
+        /** Encoded bytes queued but not yet written; must be positive. A larger message is queued only when nothing else is. */
+        public Builder maxPendingBytes(long bytes) {
+            if (bytes < 1) {
+                throw new IllegalArgumentException("maxPendingBytes must be positive: " + bytes);
+            }
+            maxPendingBytes = bytes;
+            return this;
+        }
+
+        /** Messages queued but not yet written; must be positive. */
+        public Builder maxPendingMessages(int messages) {
+            maxPendingMessages = atLeast(messages, 1, "maxPendingMessages");
+            return this;
+        }
+
+        public Builder overflowPolicy(OverflowPolicy policy) {
+            overflowPolicy = Objects.requireNonNull(policy, "policy");
+            return this;
+        }
+
+        /** How long {@link OverflowPolicy#BLOCK} waits for room; {@link Duration#ZERO} = not at all. */
+        public Builder sendTimeout(Duration timeout) {
+            sendTimeout = nonNegative(timeout, "sendTimeout");
             return this;
         }
 

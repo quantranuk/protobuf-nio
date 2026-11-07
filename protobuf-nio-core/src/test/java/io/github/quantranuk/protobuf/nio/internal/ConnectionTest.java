@@ -1,6 +1,7 @@
 package io.github.quantranuk.protobuf.nio.internal;
 
 import io.github.quantranuk.protobuf.nio.DisconnectReason;
+import io.github.quantranuk.protobuf.nio.OverflowPolicy;
 import io.github.quantranuk.protobuf.nio.SendException;
 import io.github.quantranuk.protobuf.nio.proto.TestHeartBeat.HeartBeatRequest;
 import io.github.quantranuk.protobuf.nio.proto.TestHeartBeat.HeartBeatResponse;
@@ -31,6 +32,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -45,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -451,6 +454,349 @@ public class ConnectionTest {
         assertEquals(DisconnectReason.CLOSED_LOCALLY, peer.connection.closedFuture().get(5, TimeUnit.SECONDS));
     }
 
+    // ------------------------------------------------------------------ backpressure
+
+    // The server side's reader blocks in onMessage until the gate opens, so the client's socket buffers fill up and its
+    // queue grows. Messages are 16 KB, so the writer takes up to 4 per batch and the rest stay queued.
+
+    private static final int QUEUE_LIMIT = 8;
+
+    @Test
+    public void rejectReportsOnTheCallingThreadAndKeepsTheRest() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        Pair pair = stalledPair(config().overflowPolicy(OverflowPolicy.REJECT).maxPendingMessages(QUEUE_LIMIT), gate);
+        try {
+            Connection client = pair.client.connection;
+            int sent = fillQueue(client);
+            assertEquals(QUEUE_LIMIT, client.pendingMessages());
+            HeartBeatRequest rejected = numbered(-1);
+            assertFalse(client.send(rejected));
+            Failure failure = pair.client.events.failures.poll(5, TimeUnit.SECONDS);
+            assertSame(rejected, failure.message);
+            assertEquals(SendException.Reason.REJECTED, failure.cause.reason());
+            assertSame(Thread.currentThread(), failure.thread);
+            gate.countDown();
+            assertReceivedInOrder(pair.server.events, sent, List.of());
+            assertTrue(pair.client.events.failures.isEmpty());
+            assertEquals(0, client.pendingMessages());
+            assertEquals(0, client.pendingBytes());
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void pendingBytesAreLimited() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        long limit = 5L * ProtobufSerializer.getSerializedSize(numbered(Long.MAX_VALUE)) + 1000;
+        Pair pair = stalledPair(config().overflowPolicy(OverflowPolicy.REJECT).maxPendingBytes(limit), gate);
+        try {
+            Connection client = pair.client.connection;
+            int sent = 0;
+            while (client.send(numbered(sent))) {
+                sent++;
+                assertTrue(client.pendingBytes() <= limit);
+                assertTrue(sent < 100_000, "Never full");
+            }
+            assertTrue(client.pendingMessages() <= 5);
+            assertEquals(SendException.Reason.REJECTED, pair.client.events.failures.poll(5, TimeUnit.SECONDS).cause.reason());
+            gate.countDown();
+            assertReceivedInOrder(pair.server.events, sent, List.of());
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void aMessageLargerThanMaxPendingBytesIsSentWhenNothingElseIsPending() throws Exception {
+        Pair pair = connect(config().overflowPolicy(OverflowPolicy.REJECT).maxPendingBytes(1024), config());
+        assertTrue(pair.client.connection.send(request("z".repeat(10_000))));
+        assertEquals(10_000, ((HeartBeatRequest) pair.server.events.messages.poll(5, TimeUnit.SECONDS)).getRequestMessage().length());
+    }
+
+    @Test
+    public void blockWaitsForRoom() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        Pair pair = stalledPair(config().maxPendingMessages(QUEUE_LIMIT).sendTimeout(Duration.ofSeconds(30)), gate);
+        try {
+            Connection client = pair.client.connection;
+            int sent = fillQueue(client);
+            CompletableFuture<Boolean> blocked = CompletableFuture.supplyAsync(() -> client.send(numbered(sent)), Thread::startVirtualThread);
+            Thread.sleep(200);
+            assertFalse(blocked.isDone(), "send didn't block");
+            gate.countDown();
+            assertTrue(blocked.get(5, TimeUnit.SECONDS));
+            assertReceivedInOrder(pair.server.events, sent + 1, List.of());
+            assertTrue(pair.client.events.failures.isEmpty());
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void blockGivesUpAfterTheSendTimeout() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        Pair pair = stalledPair(config().maxPendingMessages(QUEUE_LIMIT).sendTimeout(Duration.ofMillis(200)), gate);
+        try {
+            Connection client = pair.client.connection;
+            int sent = fillQueue(client);
+            long start = System.nanoTime();
+            HeartBeatRequest rejected = numbered(-1);
+            assertFalse(client.send(rejected));
+            assertTrue(System.nanoTime() - start >= TimeUnit.MILLISECONDS.toNanos(190), "Didn't wait for the send timeout");
+            Failure failure = pair.client.events.failures.poll(5, TimeUnit.SECONDS);
+            assertSame(rejected, failure.message);
+            assertEquals(SendException.Reason.REJECTED, failure.cause.reason());
+            assertSame(Thread.currentThread(), failure.thread);
+
+            // An interrupted sender doesn't wait, keeps its interrupt flag, and the message is still reported
+            Thread.currentThread().interrupt();
+            start = System.nanoTime();
+            assertFalse(client.send(rejected));
+            assertTrue(Thread.interrupted(), "Interrupt flag lost");
+            assertTrue(System.nanoTime() - start < TimeUnit.MILLISECONDS.toNanos(150), "Waited although interrupted");
+            assertEquals(SendException.Reason.REJECTED, pair.client.events.failures.poll(5, TimeUnit.SECONDS).cause.reason());
+
+            // Encoded frames (broadcast) never wait
+            start = System.nanoTime();
+            assertFalse(client.send(EncodedFrame.of(rejected)));
+            assertTrue(System.nanoTime() - start < TimeUnit.MILLISECONDS.toNanos(150), "A broadcast frame waited");
+            assertEquals(SendException.Reason.REJECTED, pair.client.events.failures.poll(5, TimeUnit.SECONDS).cause.reason());
+
+            gate.countDown();
+            assertReceivedInOrder(pair.server.events, sent, List.of());
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void closingWakesBlockedSendersWithoutReports() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        Pair pair = stalledPair(config().maxPendingMessages(QUEUE_LIMIT).sendTimeout(Duration.ofSeconds(30)), gate);
+        try {
+            Connection client = pair.client.connection;
+            int sent = fillQueue(client);
+            CompletableFuture<Boolean> blocked = CompletableFuture.supplyAsync(() -> client.send(numbered(sent)), Thread::startVirtualThread);
+            Thread.sleep(200);
+            assertFalse(blocked.isDone(), "send didn't block");
+            Thread closer = Thread.startVirtualThread(client::close);
+            assertFalse(blocked.get(5, TimeUnit.SECONDS));
+            gate.countDown();
+            closer.join(5000);
+            assertEquals(DisconnectReason.CLOSED_LOCALLY, client.awaitClosed());
+            assertReceivedInOrder(pair.server.events, sent, List.of());   // close() flushed the queue
+            assertTrue(pair.client.events.failures.isEmpty(), "Reported: " + pair.client.events.failures);
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void dropOldestDropsQueuedMessagesNotTheOnesBeingWritten() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        Pair pair = stalledPair(config().overflowPolicy(OverflowPolicy.DROP_OLDEST).maxPendingMessages(QUEUE_LIMIT), gate);
+        try {
+            Connection client = pair.client.connection;
+            int sent = fillQueue(client);
+            int queued = client.queuedMessages();
+            for (int i = 0; i < queued + 2; i++) {   // more than are queued: some of the new ones get dropped too
+                assertTrue(client.send(numbered(sent++)));
+                assertTrue(client.pendingMessages() <= QUEUE_LIMIT);
+            }
+            List<Long> dropped = new ArrayList<>();
+            for (Failure failure : pair.client.events.failures) {
+                assertEquals(SendException.Reason.DROPPED, failure.cause.reason());
+                assertSame(Thread.currentThread(), failure.thread);
+                dropped.add(((HeartBeatRequest) failure.message).getRequestTimeMillis());
+            }
+            // Exactly queued + 2 if the writer stays stalled; fewer if it manages to write a little more meanwhile
+            assertTrue(!dropped.isEmpty() && dropped.size() <= queued + 2, "Dropped: " + dropped);
+            for (int i = 1; i < dropped.size(); i++) {
+                assertEquals(dropped.get(i - 1) + 1, dropped.get(i), "Not dropped oldest first: " + dropped);
+            }
+            gate.countDown();
+            // Everything not dropped arrives exactly once and in order: a message being written is never also dropped
+            assertReceivedInOrder(pair.server.events, sent, dropped);
+            assertNull(pair.server.events.messages.poll(200, TimeUnit.MILLISECONDS));
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void dropOldestRejectsWhenEverythingPendingIsBeingWritten() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        // Two 600 KB messages don't fit in 1 MB; each is written on its own, and the first blocks in the write
+        Pair pair = stalledPair(config().overflowPolicy(OverflowPolicy.DROP_OLDEST).maxPendingBytes(1024 * 1024), gate);
+        try {
+            Connection client = pair.client.connection;
+            HeartBeatRequest big = request("b".repeat(600 * 1024));
+            int sent = 0;
+            do {
+                assertTrue(client.send(big));
+                sent++;
+                awaitTrue(() -> client.queuedMessages() == 0);
+            } while (!stalled(client));
+            assertFalse(client.send(big));
+            Failure failure = pair.client.events.failures.poll(5, TimeUnit.SECONDS);
+            assertEquals(SendException.Reason.REJECTED, failure.cause.reason());
+            assertTrue(pair.client.events.failures.isEmpty());
+            gate.countDown();
+            for (int i = 0; i < sent; i++) {
+                assertNotNull(pair.server.events.messages.poll(10, TimeUnit.SECONDS));
+            }
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void disconnectRejectsThenClosesAtOnce() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        Pair pair = stalledPair(config().overflowPolicy(OverflowPolicy.DISCONNECT).maxPendingMessages(QUEUE_LIMIT), gate);
+        try {
+            Connection client = pair.client.connection;
+            int sent = fillQueue(client);
+            HeartBeatRequest rejected = numbered(-1);
+            assertFalse(client.send(rejected));
+            Failure first = pair.client.events.failures.poll(5, TimeUnit.SECONDS);
+            assertSame(rejected, first.message);
+            assertEquals(SendException.Reason.REJECTED, first.cause.reason());
+            assertSame(Thread.currentThread(), first.thread);
+            assertEquals(DisconnectReason.SEND_QUEUE_OVERFLOW, client.awaitClosed());
+            assertFalse(client.send(numbered(0)));
+            // Not flushed: whatever wasn't written failed
+            assertEquals(sent, client.messagesWritten() + pair.client.events.failures.size(), "Every message written or failed");
+            for (Failure failure : pair.client.events.failures) {
+                assertTrue(failure.cause.reason() == SendException.Reason.CLOSED || failure.cause.reason() == SendException.Reason.WRITE_FAILED,
+                        failure.cause.toString());
+            }
+            assertEquals("disconnected", pair.client.events.calls.getLast());
+            assertEquals(0, pair.client.events.lateFailures.get());
+            assertEquals(0, client.pendingMessages());
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void rejectionsDuringTheHandshakeAreNotReported() throws Exception {
+        RawPeer peer = rawPeer(config().overflowPolicy(OverflowPolicy.REJECT).maxPendingMessages(2));   // no preamble yet
+        peer.socket.setReceiveBufferSize(4096);
+        HeartBeatRequest big = request("h".repeat(64 * 1024));
+        int sent = 0;
+        while (peer.connection.send(big)) {
+            sent++;
+            assertTrue(sent < 1000, "Never full");
+        }
+        assertTrue(peer.events.calls.isEmpty(), "Listener called during the handshake: " + peer.events.calls);
+        assertTrue(peer.events.failures.isEmpty());
+    }
+
+    @ParameterizedTest
+    @MethodSource("overflowPolicies")
+    public void sendersRacingWithCloseLoseNothing(OverflowPolicy policy) throws Exception {
+        Pair pair = connect(config().overflowPolicy(policy).maxPendingMessages(64).sendTimeout(Duration.ofMillis(50)), config());
+        Connection client = pair.client.connection;
+        AtomicInteger accepted = new AtomicInteger();
+        List<Thread> senders = new ArrayList<>();
+        for (int t = 0; t < 4; t++) {
+            senders.add(Thread.startVirtualThread(() -> {
+                for (int i = 0; i < 1_000_000; i++) {
+                    if (client.send(request(i))) {
+                        accepted.incrementAndGet();
+                    } else if (!client.isOpen()) {
+                        return;
+                    }
+                }
+            }));
+        }
+        Thread.sleep(100);
+        client.close();
+        for (Thread sender : senders) {
+            sender.join(10_000);
+            assertFalse(sender.isAlive());
+        }
+        DisconnectReason reason = client.awaitClosed();
+        pair.server.connection.awaitClosed();
+        int lost = 0;
+        for (Failure failure : pair.client.events.failures) {
+            if (failure.cause.reason() != SendException.Reason.REJECTED) {
+                lost++;   // DROPPED, or CLOSED/WRITE_FAILED after a DISCONNECT
+            }
+        }
+        assertEquals(accepted.get(), pair.server.events.messages.size() + lost, "Accepted messages unaccounted for (" + reason + ")");
+        assertEquals(0, client.pendingMessages());
+        assertEquals(0, client.pendingBytes());
+        assertEquals("disconnected", pair.client.events.calls.getLast());
+        assertEquals(0, pair.client.events.lateFailures.get());
+    }
+
+    private static Stream<OverflowPolicy> overflowPolicies() {
+        return Stream.of(OverflowPolicy.values());
+    }
+
+    /** A connected pair whose server side stops reading at the first message until the gate opens. */
+    private Pair stalledPair(ConnectionConfig.Builder clientConfig, CountDownLatch gate) throws Exception {
+        // Not a tiny SO_RCVBUF on the server: on loopback, a receive window below the MSS slows the transfer to a crawl
+        Pair pair = connect(clientConfig.socketOption(StandardSocketOptions.SO_SNDBUF, 4096), config());
+        pair.server.events.onMessage = (connection, message) -> {
+            try {
+                gate.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        return pair;
+    }
+
+    /** Sends numbered messages until the queue stays full. @return how many were sent */
+    private static int fillQueue(Connection connection) throws InterruptedException {
+        int sent = 0;
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (true) {
+            while (connection.pendingMessages() < QUEUE_LIMIT) {
+                assertTrue(connection.send(numbered(sent)));   // single sender: there's room, so it never waits
+                sent++;
+            }
+            if (stalled(connection)) {
+                return sent;
+            }
+            assertTrue(System.nanoTime() < deadline, "The queue never filled");
+        }
+    }
+
+    /** @return true if nothing has been written for 100 ms */
+    private static boolean stalled(Connection connection) throws InterruptedException {
+        long written = connection.messagesWritten();
+        Thread.sleep(100);
+        return connection.messagesWritten() == written;
+    }
+
+    private static HeartBeatRequest numbered(long i) {
+        return HeartBeatRequest.newBuilder().setRequestTimeMillis(i).setRequestMessage("n".repeat(16 * 1024)).build();
+    }
+
+    private static void assertReceivedInOrder(Recorder receiver, int sent, List<Long> missing) throws InterruptedException {
+        for (long i = 0; i < sent; i++) {
+            if (missing.contains(i)) {
+                continue;
+            }
+            MessageLite message = receiver.messages.poll(10, TimeUnit.SECONDS);
+            assertNotNull(message, "Message " + i + " not received");
+            assertEquals(i, ((HeartBeatRequest) message).getRequestTimeMillis());
+        }
+    }
+
+    private static void awaitTrue(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() < deadline, "Condition not met within 5 s");
+            Thread.sleep(5);
+        }
+    }
+
     // ------------------------------------------------------------------ memory
 
     @Test
@@ -593,7 +939,7 @@ public class ConnectionTest {
     private record Disconnect(DisconnectReason reason, Throwable cause) {
     }
 
-    private record Failure(MessageLite message, SendException cause) {
+    private record Failure(MessageLite message, SendException cause, Thread thread) {
     }
 
     private static final class Recorder implements ConnectionListener {
@@ -602,6 +948,7 @@ public class ConnectionTest {
         final CountDownLatch connected = new CountDownLatch(1);
         final AtomicInteger connectedCalls = new AtomicInteger();
         final AtomicInteger disconnectedCalls = new AtomicInteger();
+        final AtomicInteger lateFailures = new AtomicInteger();   // onSendFailure after onDisconnected
         final BlockingQueue<MessageLite> messages = new LinkedBlockingQueue<>();
         final BlockingQueue<Failure> failures = new LinkedBlockingQueue<>();
         final BlockingQueue<Disconnect> disconnects = new LinkedBlockingQueue<>();
@@ -625,7 +972,10 @@ public class ConnectionTest {
             if (calls.isEmpty() || !calls.getLast().equals("failure")) {
                 calls.add("failure");
             }
-            failures.add(new Failure(message, cause));
+            if (disconnectedCalls.get() > 0) {
+                lateFailures.incrementAndGet();
+            }
+            failures.add(new Failure(message, cause, Thread.currentThread()));
         }
 
         @Override
