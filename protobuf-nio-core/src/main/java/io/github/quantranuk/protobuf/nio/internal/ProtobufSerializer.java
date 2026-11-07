@@ -1,6 +1,5 @@
-package io.github.quantranuk.protobuf.nio.serializer;
+package io.github.quantranuk.protobuf.nio.internal;
 
-import io.github.quantranuk.protobuf.nio.utils.ByteUtils;
 import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;

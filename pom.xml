@@ -9,7 +9,7 @@
     <version>2.0.0-SNAPSHOT</version>
     <modules>
         <module>protobuf-nio-core</module>
-        <module>protobuf-nio-sample</module>
+        <!-- protobuf-nio-sample is out of the build while 2.0 is rewritten; it returns once ported to the new API -->
     </modules>
     <packaging>pom</packaging>
 
@@ -23,7 +23,6 @@
         <protobuf.version>4.36.2</protobuf.version>
         <slf4j.version>2.0.20</slf4j.version>
         <log4j.version>2.26.1</log4j.version>
-        <jakarta-annotation.version>3.0.0</jakarta-annotation.version>
         <junit.version>6.1.3</junit.version>
 
         <!-- Plugins -->
@@ -44,11 +43,6 @@
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-api</artifactId>
                 <version>${slf4j.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>jakarta.annotation</groupId>
-                <artifactId>jakarta.annotation-api</artifactId>
-                <version>${jakarta-annotation.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.logging.log4j</groupId>

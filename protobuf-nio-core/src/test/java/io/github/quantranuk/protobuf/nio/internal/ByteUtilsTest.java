@@ -1,4 +1,4 @@
-package io.github.quantranuk.protobuf.nio.utils;
+package io.github.quantranuk.protobuf.nio.internal;
 
 import org.junit.jupiter.api.Test;
 

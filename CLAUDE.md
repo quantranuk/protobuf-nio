@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Java library for sending and receiving protobuf messages over Java NIO sockets (`java.nio.channels.Asynchronous*`), with no netty/mina dependency. SSL/TLS is not supported; per the README, adding it would need a major redesign because of how `SSLEngine` works.
+Java library for sending and receiving protobuf messages over TCP with no netty/mina dependency.
+
+**Status: mid-rewrite to 2.0.** 1.x (async NIO, `java.nio.channels.Asynchronous*`, no TLS) has been removed from `master`; its last version is the git tag `1.x-final`, which is the reference for 1.x behaviour, its tests (`ChannelRobustnessTest`) and its benchmark baseline. 2.0 is a rewrite on virtual threads with blocking sockets, a new API (`ProtoClient` / `ProtoServer` / `ProtoConnection`), TLS, backpressure and a one-time protocol preamble. The frame format is unchanged. There's no backward compatibility with 1.x, which had no users.
 
 ## Build & test
 
@@ -23,22 +25,16 @@ Protobuf code is generated at build time by `io.github.ascopes:protobuf-maven-pl
 - core: `src/test/proto/TestHeartBeat.proto` → test classes (`generate-test`)
 - sample: `src/main/proto/HeartBeat.proto` → main classes (`generate`)
 
-The sample module's "tests" (`SampleServer`, `SampleClient`, `SampleClientBenchmarkTest`, `MultiClientsTest`) are `main()` programs in `src/main`, not JUnit tests. Start `SampleServer` first, then a client.
+`protobuf-nio-sample` is **not in the root `<modules>` list** during the rewrite: it still uses the 1.x API and goes back into the build once it's ported to 2.0. Its "tests" (`SampleServer`, `SampleClient`, `SampleClientBenchmarkTest`, `MultiClientsTest`) are `main()` programs in `src/main`, not JUnit tests.
 
 ## Architecture (protobuf-nio-core)
 
-**Public API:** `ProtoChannelFactory.newClient(host, port)` / `newServer(port)` return builders that produce `ProtoSocketChannel` / `ProtoServerSocketChannel`. Callers register functional handler interfaces from `handlers/` (connection, disconnection, message received/sent/send-failure). Every handler callback receives the remote `SocketAddress`.
+Everything currently lives in the non-exported package `io.github.quantranuk.protobuf.nio.internal`, carried over from 1.x:
 
-**Wire format** (`serializer/ProtobufSerializer`): each frame is a 12-byte header of three ints, `SIGNATURE (0x7A6B5C4D)`, class-name length and payload length. The ISO-8859-1 fully-qualified Java class name comes next, then the protobuf bytes. On receive, the class name is resolved by reflection (`Class.forName(name, false, …)`, checked to be a `Message`, then `getDefaultInstance().getParserForType()`). The `Parser` is cached in a global map keyed by a private copy of the name bytes (never the caller's buffer, which is a view over a reusable read buffer), and each reader also keeps a small cache of 8 entries so the hot path avoids hashing the name. Both peers therefore need the same generated protobuf classes on their classpath. Renaming or moving a proto class's Java package breaks wire compatibility.
+- **`ProtobufSerializer`** (wire format): each frame is a 12-byte header of three ints, `SIGNATURE (0x7A6B5C4D)`, class-name length and payload length. The ISO-8859-1 fully-qualified Java class name comes next, then the protobuf bytes. `serializeInto` encodes straight into a batch buffer, with class names encoded once per class (`ClassValue`). On receive, the class name is resolved by reflection (`Class.forName(name, false, …)`, so the class isn't initialised before it's known to be a `Message`, then `getDefaultInstance().getParserForType()`). The `Parser` is cached in a global map keyed by a private copy of the name bytes, never the caller's buffer, which is a view over a reusable read buffer. (1.x's reader also kept an 8-entry per-reader cache to skip hashing; see `SocketChannelReader` at `1.x-final`.) Both peers need the same generated protobuf classes on their classpath, and renaming or moving a proto class's Java package breaks wire compatibility.
+- **`ByteArrayDequeue`**: growable byte deque. `prepareWrite`/`commitWrite` let socket reads land directly in its storage.
+- **`ByteUtils`**: big-endian int/long/string helpers.
 
-**Client channel** (`impl/AsyncProtoSocketChannel`): the base unit. It owns an `AsynchronousSocketChannel` and delegates to two helpers:
-- `SocketChannelReader`: a state machine (`READING_MESSAGE_HEADER` → `READING_MESSAGE_BODY`). It reads straight into a `ByteArrayDequeue` (`prepareWrite`/`commitWrite`) until a full frame is present. Reads start at 8 KB and double, up to the read buffer size, only while reads fill the space offered, so idle connections stay small. A bad signature, out-of-range lengths (`maxMessageSize`), a parse error or EOF goes through the failure path, which disconnects the channel.
-- `SocketChannelWriter`: `sendMessage` is non-blocking. It appends to a lock-free `ConcurrentLinkedQueue`, and schedules the write executor only when the `writerActive` flag flips from false to true, so there is one executor task per active period, not per message. The writer drains batches of up to the write buffer size, serializes each batch into a `ByteArrayDequeue`, and writes straight from that storage (partial writes resume from the buffer position). It releases the flag only when the queue is empty, re-checking afterwards to avoid stranding a message. A write failure fails in-flight and queued messages and disconnects the channel. The outbound queue is capped at `DefaultSetting.MAX_WRITE_MESSAGE_QUEUE_SIZE`.
+Planned 2.0 threading model: each connection has a reader virtual thread and a writer virtual thread. Message listeners run on the connection's reader thread, so listeners for one connection run in order and different connections run concurrently. The writer drains the send queue in batches (one socket write per batch). Avoid `synchronized` on blocking paths (use `ReentrantLock`), and block once per batch, not once per message.
 
-**Threading model (important):** apart from the writer's outbound queue, counter, flag and stop cause, reader and writer state is not synchronized. Correctness relies on each channel's reads all running on one **single-threaded** read executor and its writes all running on one single-threaded write executor. Completion handlers re-dispatch onto those executors before touching state. `setReadExecutor`/`setWriteExecutor` reject a `ThreadPoolExecutor` with max pool size ≠ 1. The read executor also backs the `AsynchronousChannelGroup`. Executors injected from outside are not shut down on `disconnect()`, and internally created ones are. Sharing one executor pair across many channels is how a single thread handles thousands of connections, as in `MultiClientsTest`.
-
-**Server channel** (`impl/AsyncProtoServerSocketChannel`): accepts on its own acceptor executor. For each accepted socket it builds an `AsyncProtoSocketChannel`, injecting the server's shared single-threaded read and write executors and calling `setSocketChannel` with the accepted socket. It keeps the channels in a `Map<SocketAddress, ProtoSocketChannel>` and forwards each channel's events to the server-level handlers. A per-client disconnect removes that client from the map.
-
-`init()` / `disconnect()` carry `jakarta.annotation` `@PostConstruct` / `@PreDestroy` so the channels can be managed as DI beans. The factory builders call `init()` themselves.
-
-`protobuf-java` (4.x) and `slf4j-api` are compile-scope dependencies of core, so consumers get them transitively. `jakarta.annotation-api` is `<optional>` (only needed for DI). Log4j is test scope only in core, so don't add a logging backend to core's compile or runtime scope.
+`protobuf-java` (4.x) and `slf4j-api` are compile-scope dependencies of core, so consumers get them transitively. Log4j is test scope only in core, so don't add a logging backend to core's compile or runtime scope. Use `MessageLite` rather than `Message` in new API code.

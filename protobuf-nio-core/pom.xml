@@ -20,13 +20,6 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
         </dependency>
-        <!-- Only for the @PostConstruct/@PreDestroy annotations used by DI containers. The JVM ignores annotations
-             whose classes are missing, so users who don't use DI don't need it. -->
-        <dependency>
-            <groupId>jakarta.annotation</groupId>
-            <artifactId>jakarta.annotation-api</artifactId>
-            <optional>true</optional>
-        </dependency>
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>

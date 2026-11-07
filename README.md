@@ -2,6 +2,8 @@
 
 # protobuf-nio
 
+> **`master` is being rewritten for 2.0** (virtual threads, a new API, TLS) and doesn't currently have a usable public API. The rest of this README describes 1.x, whose last version is tagged [`1.x-final`](https://github.com/quantranuk/protobuf-nio/tree/1.x-final). It will be rewritten when 2.0 is ready.
+
 A small Java library for sending and receiving [Protocol Buffers](https://protobuf.dev/) messages over TCP, built directly on Java NIO asynchronous sockets (`java.nio.channels.Asynchronous*`). It has no Netty or Mina dependency.
 
 - **No framework dependencies:** only `protobuf-java` and `slf4j-api`.

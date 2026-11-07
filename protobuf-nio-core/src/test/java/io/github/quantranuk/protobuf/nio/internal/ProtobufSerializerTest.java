@@ -1,4 +1,4 @@
-package io.github.quantranuk.protobuf.nio.serializer;
+package io.github.quantranuk.protobuf.nio.internal;
 
 import io.github.quantranuk.protobuf.nio.proto.TestHeartBeat;
 import com.google.protobuf.Message;
