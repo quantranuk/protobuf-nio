@@ -9,6 +9,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -47,6 +48,25 @@ public class ProtobufSerializerTest {
 
         assertEquals(requestTimeMillis, ((TestHeartBeat.HeartBeatRequest) deserializedMessage).getRequestTimeMillis());
         assertEquals(requestMessage, ((TestHeartBeat.HeartBeatRequest) deserializedMessage).getRequestMessage());
+    }
+
+    @Test
+    public void testSerializeIntoMatchesSerializeAtAnyBufferPosition() {
+        TestHeartBeat.HeartBeatRequest message = TestHeartBeat.HeartBeatRequest.newBuilder()
+                .setRequestTimeMillis(123456789L)
+                .setRequestMessage("payload")
+                .build();
+        byte[] expected = ProtobufSerializer.serialize(message);
+        assertEquals(expected.length, ProtobufSerializer.getSerializedSize(message));
+
+        byte[] backing = new byte[expected.length + 20];
+        ByteBuffer target = ByteBuffer.wrap(backing, 7, expected.length + 5);  // non-zero position, spare room at the end
+        ProtobufSerializer.serializeInto(message, target);
+
+        assertEquals(7 + expected.length, target.position());
+        assertArrayEquals(expected, Arrays.copyOfRange(backing, 7, 7 + expected.length));
+        assertEquals(0, backing[6]);
+        assertEquals(0, backing[7 + expected.length]);
     }
 
     @Test

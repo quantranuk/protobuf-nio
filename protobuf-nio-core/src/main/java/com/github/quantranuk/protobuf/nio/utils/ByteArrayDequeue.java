@@ -10,16 +10,17 @@ public final class ByteArrayDequeue {
     private static final int INITIAL_CAPACITY = 8192;
 
     private byte[] primaryArray;
+    private ByteBuffer primaryArrayView;  // reused to create popped slices with a single allocation
     private int position = 0;
     private int limit = 0;
     private int remaining = 0;
 
     public ByteArrayDequeue() {
-        primaryArray = new byte[INITIAL_CAPACITY];
+        setPrimaryArray(new byte[INITIAL_CAPACITY]);
     }
 
     ByteArrayDequeue(int initalCapacity) {
-        primaryArray = new byte[initalCapacity];
+        setPrimaryArray(new byte[initalCapacity]);
     }
 
     /**
@@ -120,7 +121,7 @@ public final class ByteArrayDequeue {
             return null;  // Not enough data
         }
         int lengthToPop = Integer.min(remaining, maximumLengthToPop);
-        ByteBuffer result = ByteBuffer.wrap(primaryArray, position, lengthToPop).slice();
+        ByteBuffer result = primaryArrayView.slice(position, lengthToPop);
         position += lengthToPop;
         remaining -= lengthToPop;
         return result;
@@ -130,7 +131,7 @@ public final class ByteArrayDequeue {
         if (remaining < lengthToPop) {
             throw new IllegalStateException("Not enough remaining bytes. Expect " + lengthToPop + " but remaining is only " + remaining);
         }
-        ByteBuffer result = ByteBuffer.wrap(primaryArray, position, lengthToPop).slice();
+        ByteBuffer result = primaryArrayView.slice(position, lengthToPop);
         position += lengthToPop;
         remaining -= lengthToPop;
         return result;
@@ -155,9 +156,14 @@ public final class ByteArrayDequeue {
     private void allocateMoreSpace(int newLength) {
         byte[] newAllocation = new byte[newLength + Integer.min(newLength, Integer.MAX_VALUE - newLength)];
         System.arraycopy(primaryArray, position, newAllocation, 0, remaining);
-        primaryArray = newAllocation;
+        setPrimaryArray(newAllocation);
         position = 0;
         limit = remaining;
+    }
+
+    private void setPrimaryArray(byte[] array) {
+        primaryArray = array;
+        primaryArrayView = ByteBuffer.wrap(array);
     }
 
     public void clear() {

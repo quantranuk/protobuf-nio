@@ -1,10 +1,12 @@
 package com.github.quantranuk.protobuf.nio.serializer;
 
 import com.github.quantranuk.protobuf.nio.utils.ByteUtils;
+import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
 
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
@@ -27,6 +29,13 @@ public final class ProtobufSerializer {
 
     private static final Charset CHARSET = StandardCharsets.ISO_8859_1;
     private static final Map<ByteBuffer, Parser<? extends Message>> CACHED_PARSERS = new ConcurrentHashMap<>();
+    // The ISO-8859-1 class name sent with every message, encoded once per class
+    private static final ClassValue<byte[]> ENCODED_CLASS_NAMES = new ClassValue<>() {
+        @Override
+        protected byte[] computeValue(Class<?> type) {
+            return type.getName().getBytes(CHARSET);
+        }
+    };
 
     /**
      * <p>Serialize a protobuf message into bytes array. The bytes array will contain in this order:</p>
@@ -41,19 +50,36 @@ public final class ProtobufSerializer {
      * @return serialized byte arrays
      */
     public static byte[] serialize(Message message) {
-        ByteBuffer encodedProtobufClassName = CHARSET.encode(message.getClass().getName());
-        int protobufClassNameLength = encodedProtobufClassName.capacity();
+        byte[] bytes = new byte[getSerializedSize(message)];
+        serializeInto(message, ByteBuffer.wrap(bytes));
+        return bytes;
+    }
 
-        byte[] protobufPayload = message.toByteArray();
-        int protobufPayloadLength = protobufPayload.length;
-
-        ByteBuffer buffer = ByteBuffer.allocate(HEADER_LENGTH + protobufClassNameLength + protobufPayloadLength);
-        buffer.putInt(SIGNATURE);
-        buffer.putInt(protobufClassNameLength);
-        buffer.putInt(protobufPayloadLength);
-        buffer.put(encodedProtobufClassName);
-        buffer.put(protobufPayload);
-        return buffer.array();
+    /**
+     * Serialize a protobuf message, in the same format as {@link #serialize(Message)}, directly into a heap buffer, without
+     * intermediate copies. The buffer must have at least {@link #getSerializedSize(Message)} bytes remaining, and its
+     * position is advanced by that many bytes.
+     * @param message the protobuf message
+     * @param target the buffer to write into
+     */
+    public static void serializeInto(Message message, ByteBuffer target) {
+        byte[] encodedProtobufClassName = ENCODED_CLASS_NAMES.get(message.getClass());
+        int protobufPayloadLength = message.getSerializedSize();
+        target.putInt(SIGNATURE);
+        target.putInt(encodedProtobufClassName.length);
+        target.putInt(protobufPayloadLength);
+        target.put(encodedProtobufClassName);
+        int payloadStart = target.position();
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(target);
+            message.writeTo(output);
+            output.flush();
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to serialize " + message.getClass().getName(), e);
+        }
+        if (target.position() - payloadStart != protobufPayloadLength) {
+            throw new IllegalStateException("Serialized size of " + message.getClass().getName() + " changed while serializing");
+        }
     }
 
     /**
@@ -62,7 +88,7 @@ public final class ProtobufSerializer {
      * @return the size of a fully serialized message in bytes (including the header size)
      */
     public static int getSerializedSize(Message message) {
-        return HEADER_LENGTH + message.getClass().getName().length() + message.getSerializedSize();
+        return HEADER_LENGTH + ENCODED_CLASS_NAMES.get(message.getClass()).length + message.getSerializedSize();
     }
 
     /**

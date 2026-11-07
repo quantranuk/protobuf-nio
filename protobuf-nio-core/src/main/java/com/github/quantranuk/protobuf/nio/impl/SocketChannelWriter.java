@@ -143,7 +143,10 @@ class SocketChannelWriter {
     private void writeMessages() {
         writeBytesQueue.clear();
         for (Message message : messagesBeingWritten) {
-            writeBytesQueue.push(ProtobufSerializer.serialize(message));
+            // Encode straight into the batch storage: no per-message frame array or payload copy
+            int size = ProtobufSerializer.getSerializedSize(message);
+            ProtobufSerializer.serializeInto(message, writeBytesQueue.prepareWrite(size));
+            writeBytesQueue.commitWrite(size);
         }
         // Write straight from the queue's storage; nothing modifies it until the whole batch is written
         batchBuffer = writeBytesQueue.popMaximum(writeBytesQueue.getRemaining());
