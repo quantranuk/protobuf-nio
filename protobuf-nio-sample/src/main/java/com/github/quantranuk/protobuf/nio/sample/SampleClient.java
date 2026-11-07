@@ -29,8 +29,7 @@ public class SampleClient {
     }
 
     private static void onMsgReceived(SocketAddress socketAddress, Message message) {
-        if (message instanceof HeartBeat.HeartBeatResponse) {
-            HeartBeat.HeartBeatResponse heartBeatResponse = (HeartBeat.HeartBeatResponse) message;
+        if (message instanceof HeartBeat.HeartBeatResponse heartBeatResponse) {
             LOGGER.info("Received message from {}:\n{}", socketAddress, heartBeatResponse);
             clientChannel.disconnect();
         } else {
@@ -39,7 +38,7 @@ public class SampleClient {
     }
 
     private static void onMsgSendFailure(SocketAddress socketAddress, Message message, Throwable t) {
-        LOGGER.error("An error has occurred while sending msg " + message.getClass().getName(), t);
+        LOGGER.error("An error has occurred while sending msg {}", message.getClass().getName(), t);
     }
 
 }

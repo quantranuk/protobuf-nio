@@ -22,11 +22,11 @@ public class MultiClientsTest {
     private static final int NO_OF_CLIENTS = 15000;
     private static final List<ProtoSocketChannel> CLIENT_CHANNELS = new ArrayList<>(NO_OF_CLIENTS);
 
-    private static MessageFactory messageFactory = new MessageFactory();
+    private static final MessageFactory messageFactory = new MessageFactory();
     private static long heartBeatResponseReceived = 0;
 
-    private static ExecutorService readExecutor = Executors.newSingleThreadExecutor();
-    private static ExecutorService writeExecutor = Executors.newSingleThreadExecutor();
+    private static final ExecutorService readExecutor = Executors.newSingleThreadExecutor();
+    private static final ExecutorService writeExecutor = Executors.newSingleThreadExecutor();
 
     public static void main(String[] args) {
         for (int i = 0; i < NO_OF_CLIENTS; i++) {

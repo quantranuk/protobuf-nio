@@ -1,0 +1,16 @@
+syntax = "proto3";
+package com.github.quantranuk.protobuf.nio.proto;
+
+option java_package = "com.github.quantranuk.protobuf.nio.proto";
+option java_outer_classname = "TestHeartBeat";
+
+message HeartBeatRequest {
+    int64 requestTimeMillis = 1;
+    string requestMessage = 2;
+}
+
+message HeartBeatResponse {
+    int64 requestTimeMillis = 1;
+    int64 responseTimeMillis = 2;
+    string responseMessage = 3;
+}

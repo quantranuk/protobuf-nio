@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.org/quantranuk/protobuf-nio.svg?branch=master)](https://travis-ci.org/quantranuk/protobuf-nio)
+[![Build](https://github.com/quantranuk/protobuf-nio/actions/workflows/build.yml/badge.svg)](https://github.com/quantranuk/protobuf-nio/actions/workflows/build.yml)
 # protobuf-nio
 Simple library to send and receive [protobuf messages](https://developers.google.com/protocol-buffers/) using Java NIO sockets
 
@@ -13,13 +13,22 @@ Simple library to send and receive [protobuf messages](https://developers.google
 
 _Note: due to the way [SSL Engine](https://docs.oracle.com/javase/8/docs/api/javax/net/ssl/SSLEngine.html) is implemented, adding SSL/TLS support will require major change to the code, this is also complained in [here](https://jfarcand.wordpress.com/2006/09/21/tricks-and-tips-with-nio-part-v-ssl-and-nio-friend-or-foe) and [here](https://stackoverflow.com/questions/9118367/java-nio-channels-and-tls)_
 
+## Requirements
+- Java 25+
+- protobuf-java 4.x and slf4j-api 2.x on the classpath (they are `provided` dependencies, so your project must declare them)
+
+## Building
+```
+./mvnw clean install
+```
+
 ## Getting Started
 
 ### Server side
 ##### Create server and connect
 ```
 // Create server listening to port 3456
-ProtoServerocketChannel server = ProtoChannelFactory.newServer(3456).build();
+ProtoServerSocketChannel server = ProtoChannelFactory.newServer(3456).build();
  
 // Register message handlers
 server.addMessageReceivedHandler(this::onMessageReceived);

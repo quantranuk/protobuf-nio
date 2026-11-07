@@ -78,7 +78,7 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
     @Override
     public void start() throws IOException {
         serverSocketChannel.bind(serverSocketAddress);
-        LOGGER.info("Bind to port " + serverPort);
+        LOGGER.info("Bind to port {}", serverPort);
         acceptExecutor.execute(this::acceptNewConnection);
     }
 
@@ -86,11 +86,11 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
         if (!serverSocketChannel.isOpen()) {
             return;
         }
-        serverSocketChannel.accept(null, new CompletionHandler<AsynchronousSocketChannel, Object>() {
+        serverSocketChannel.accept(null, new CompletionHandler<>() {
             @Override
             public void completed(AsynchronousSocketChannel socketChannel, Object attachment) {
                 SocketAddress remoteAddress = getRemoteAddress(socketChannel);
-                LOGGER.info("Accepted connection from " + remoteAddress);
+                LOGGER.info("Accepted connection from {}", remoteAddress);
                 AsyncProtoSocketChannel protobufSocketChannel = createProtobufSocketChannel(socketChannel, remoteAddress);
                 connectionHandlers.forEach(handler -> handler.onConnected(remoteAddress));
                 socketChannels.put(remoteAddress, protobufSocketChannel);
@@ -100,7 +100,7 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
 
             @Override
             public void failed(Throwable exc, Object attachment) {
-                LOGGER.error("Unable to accept new connection at port " + serverPort, exc);
+                LOGGER.error("Unable to accept new connection at port {}", serverPort, exc);
                 if (serverSocketChannel.isOpen()) {
                     acceptNewConnection();
                 }
@@ -117,8 +117,8 @@ public class AsyncProtoServerSocketChannel implements ProtoServerSocketChannel {
         protobufSocketChannel.setReadTimeoutMillis(readTimeoutMillis);
         protobufSocketChannel.setWriteTimeoutMillis(writeTimeoutMillis);
         protobufSocketChannel.setSocketChannel(socketChannel);
-        protobufSocketChannel.addDisconnectionHandler((socketAddress) -> {
-            LOGGER.info("Disconnected from " + socketAddress);
+        protobufSocketChannel.addDisconnectionHandler(socketAddress -> {
+            LOGGER.info("Disconnected from {}", socketAddress);
             socketChannels.remove(socketAddress);
             disconnectionHandlers.forEach(handler -> handler.onDisconnected(socketAddress));
         });

@@ -12,29 +12,25 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class NamedThreadFactory implements ThreadFactory {
 
-    private static final int STACK_SIZE = 0;
     private static final AtomicInteger POOL_NUMBER = new AtomicInteger(1);
     private static final Logger LOGGER = LoggerFactory.getLogger("UncaughtExceptionHandler");
     private static final Thread.UncaughtExceptionHandler UNCAUGHT_EXCEPTION_HANDLER = (t, e) -> LOGGER.error("Exception thrown from {}", t.getName(), e);
 
-    private final ThreadGroup group;
-    private final AtomicInteger threadNumber = new AtomicInteger(1);
-    private final String namePrefix;
+    private final ThreadFactory delegate;
 
     public NamedThreadFactory(String prefix) {
-        group = Thread.currentThread().getThreadGroup();
-        namePrefix = prefix + "-pool-" + POOL_NUMBER.getAndIncrement() + "-thread-";
+        delegate = Thread.ofPlatform()
+                .group(Thread.currentThread().getThreadGroup())
+                .name(prefix + "-pool-" + POOL_NUMBER.getAndIncrement() + "-thread-", 1)
+                .daemon(false)
+                .priority(Thread.NORM_PRIORITY)
+                .uncaughtExceptionHandler(UNCAUGHT_EXCEPTION_HANDLER)
+                .factory();
     }
 
     @Override
     public Thread newThread(@Nonnull Runnable r) {
-        Thread t = new Thread(group, r,namePrefix + threadNumber.getAndIncrement(), STACK_SIZE);
-        if (t.isDaemon())
-            t.setDaemon(false);
-        if (t.getPriority() != Thread.NORM_PRIORITY)
-            t.setPriority(Thread.NORM_PRIORITY);
-        t.setUncaughtExceptionHandler(UNCAUGHT_EXCEPTION_HANDLER);
-        return t;
+        return delegate.newThread(r);
     }
 
 }

@@ -28,18 +28,17 @@ public class SampleServer {
     }
 
     private static void onMsgReceived(SocketAddress address, Message message) {
-        if (message instanceof HeartBeat.HeartBeatRequest) {
-            HeartBeat.HeartBeatRequest heartBeatRequest = (HeartBeat.HeartBeatRequest) message;
+        if (message instanceof HeartBeat.HeartBeatRequest heartBeatRequest) {
             long heartBeatRequestRequestTimeMillis = heartBeatRequest.getRequestTimeMillis();
             HeartBeat.HeartBeatResponse heartBeatResponse = messageFactory.createHeartBeatResponse(heartBeatRequestRequestTimeMillis);
             serverChannel.sendMessage(address, heartBeatResponse);
         } else {
-            LOGGER.info("Received unknown message: " + message.toString());
+            LOGGER.info("Received unknown message: {}", message);
         }
     }
 
     private static void onMsgSendFailure(SocketAddress socketAddress, Message message, Throwable t) {
-        LOGGER.error("An error has occurred while sending message " + message.getClass().getName(), t);
+        LOGGER.error("An error has occurred while sending message {}", message.getClass().getName(), t);
     }
 
 }

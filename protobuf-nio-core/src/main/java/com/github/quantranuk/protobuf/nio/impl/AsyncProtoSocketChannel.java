@@ -225,7 +225,7 @@ public class AsyncProtoSocketChannel implements ProtoSocketChannel {
     }
 
     private static void validateSingleThreadedPool(ExecutorService executor) {
-        if (executor instanceof ThreadPoolExecutor && ((ThreadPoolExecutor) executor).getMaximumPoolSize() != 1) {
+        if (executor instanceof ThreadPoolExecutor pool && pool.getMaximumPoolSize() != 1) {
             throw new IllegalStateException("This class can only support single-threaded pool");
         }
     }
