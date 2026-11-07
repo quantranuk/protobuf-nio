@@ -65,7 +65,7 @@ public class ProtobufSerializerTest {
             assertInstanceOf(TestHeartBeat.HeartBeatResponse.class, deserialized);
         }
 
-        Field cacheField = ProtobufSerializer.class.getDeclaredField("CACHED_PARSE_PROTOBUF_METHODS");
+        Field cacheField = ProtobufSerializer.class.getDeclaredField("CACHED_PARSERS");
         cacheField.setAccessible(true);
         Map<?, ?> cache = (Map<?, ?>) cacheField.get(null);
         assertTrue(cache.size() <= 2, "Expected one cache entry per class but found " + cache.size());

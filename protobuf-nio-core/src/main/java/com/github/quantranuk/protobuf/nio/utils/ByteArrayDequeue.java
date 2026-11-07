@@ -78,6 +78,37 @@ public final class ByteArrayDequeue {
         remaining += srcLengthToPush;
     }
 
+    /**
+     * Reserve {@code length} free bytes at the back of the queue, compacting or growing the storage as needed, and return
+     * a buffer over them for a caller to fill (e.g. a socket read). Call {@link #commitWrite(int)} with the number of bytes
+     * actually written. The queue must not be modified in between.
+     * @param length number of bytes to reserve
+     * @return a buffer whose position is at the back of the queue and whose remaining size is {@code length}
+     */
+    public ByteBuffer prepareWrite(int length) {
+        assertLengthToPush(length);
+        int newLength = remaining + length;
+        if (primaryArray.length < newLength) {
+            allocateMoreSpace(newLength);
+        }
+        if (primaryArray.length - limit < length) {
+            reallocate(0);
+        }
+        return ByteBuffer.wrap(primaryArray, limit, length);
+    }
+
+    /**
+     * Append the bytes written into the buffer returned by the last {@link #prepareWrite(int)} call
+     * @param length number of bytes written
+     */
+    public void commitWrite(int length) {
+        if (length < 0 || length > primaryArray.length - limit) {
+            throw new IllegalArgumentException("Invalid committed length " + length + " (free space is " + (primaryArray.length - limit) + ")");
+        }
+        limit += length;
+        remaining += length;
+    }
+
     private void reallocate(int destPos) {
         System.arraycopy(primaryArray, position, primaryArray, destPos, remaining);
         position = destPos;

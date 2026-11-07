@@ -15,6 +15,10 @@ import java.net.Socket;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -147,6 +151,84 @@ public class ChannelRobustnessTest {
         client.disconnect();
         client.disconnect();
         assertEquals(1, disconnects.get());
+    }
+
+    @Test
+    public void concurrentSendersDeliverEverythingInOrderPerSender() throws Exception {
+        int senders = 4;
+        int messagesPerSender = 50_000;
+        ProtoSocketChannel client = ProtoChannelFactory.newClient("localhost", port).build();
+        AtomicInteger sent = new AtomicInteger();
+        client.addMessageSentHandler((address, message) -> sent.incrementAndGet());
+        client.connect();
+
+        List<Thread> threads = new ArrayList<>();
+        for (int s = 0; s < senders; s++) {
+            int sender = s;
+            threads.add(Thread.ofPlatform().start(() -> {
+                for (int i = 0; i < messagesPerSender; i++) {
+                    client.sendMessage(HeartBeatRequest.newBuilder().setRequestTimeMillis(i).setRequestMessage("s" + sender).build());
+                }
+            }));
+        }
+        for (Thread thread : threads) {
+            thread.join();
+        }
+
+        Map<String, Long> lastSeen = new HashMap<>();
+        for (int i = 0; i < senders * messagesPerSender; i++) {
+            HeartBeatRequest message = (HeartBeatRequest) received.poll(10, TimeUnit.SECONDS);
+            assertNotNull(message, "Only received " + i + " messages");
+            long previous = lastSeen.getOrDefault(message.getRequestMessage(), -1L);
+            assertEquals(previous + 1, message.getRequestTimeMillis(), "Out of order for sender " + message.getRequestMessage());
+            lastSeen.put(message.getRequestMessage(), message.getRequestTimeMillis());
+        }
+        long deadline = System.currentTimeMillis() + 5000;
+        while (sent.get() < senders * messagesPerSender && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(senders * messagesPerSender, sent.get());
+        client.disconnect();
+    }
+
+    @Test
+    public void messageLargerThanBatchAndReadSizeIsDelivered() throws Exception {
+        ProtoSocketChannel client = ProtoChannelFactory.newClient("localhost", port).build();
+        BlockingQueue<Message> clientReceived = new LinkedBlockingQueue<>();
+        client.addMessageReceivedHandler((address, message) -> clientReceived.add(message));
+        CountDownLatch connected = new CountDownLatch(1);
+        server.addConnectionHandler(address -> connected.countDown());
+        client.connect();
+        assertTrue(connected.await(5, TimeUnit.SECONDS));
+
+        String bigText = "x".repeat(1_000_000);  // well above the 64 KB batch and read sizes
+        server.sendMessageToAll(request("small-before"));
+        server.sendMessageToAll(request(bigText));
+        server.sendMessageToAll(request("small-after"));
+        assertEquals("small-before", ((HeartBeatRequest) clientReceived.poll(5, TimeUnit.SECONDS)).getRequestMessage());
+        assertEquals(bigText, ((HeartBeatRequest) clientReceived.poll(5, TimeUnit.SECONDS)).getRequestMessage());
+        assertEquals("small-after", ((HeartBeatRequest) clientReceived.poll(5, TimeUnit.SECONDS)).getRequestMessage());
+        client.disconnect();
+    }
+
+    @Test
+    public void queuedMessagesFailWhenClientDisconnects() throws Exception {
+        ProtoSocketChannel client = ProtoChannelFactory.newClient("localhost", port).build();
+        AtomicInteger sent = new AtomicInteger();
+        AtomicInteger failed = new AtomicInteger();
+        client.addMessageSentHandler((address, message) -> sent.incrementAndGet());
+        client.addMessageSendFailureHandler((address, message, t) -> failed.incrementAndGet());
+        client.connect();
+        int total = 200_000;
+        for (int i = 0; i < total; i++) {
+            client.sendMessage(request("m" + i));
+        }
+        client.disconnect();
+        long deadline = System.currentTimeMillis() + 5000;
+        while (sent.get() + failed.get() < total && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(total, sent.get() + failed.get(), "Every message must be reported as sent or failed");
     }
 
     private static void assertClosedByPeer(Socket socket) throws IOException {

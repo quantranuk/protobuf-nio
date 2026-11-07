@@ -4,6 +4,7 @@ import com.github.quantranuk.protobuf.nio.serializer.ProtobufSerializer;
 import com.github.quantranuk.protobuf.nio.utils.ByteArrayDequeue;
 import com.github.quantranuk.protobuf.nio.utils.DefaultSetting;
 import com.google.protobuf.Message;
+import com.google.protobuf.Parser;
 
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
@@ -14,7 +15,16 @@ import java.util.concurrent.TimeUnit;
 
 class SocketChannelReader {
 
-    private final ByteBuffer readBuffer;
+    private static final int INITIAL_READ_SIZE = 8192;
+    private static final int PARSER_CACHE_SIZE = 8;
+
+    private final int maxReadSize;
+    private int readSize;
+    // Small per-channel cache: streams usually carry few message types, and comparing a few names with the vectorized
+    // ByteBuffer.equals is much cheaper than hashing the class name for the shared map on every message
+    private final ByteBuffer[] cachedClassNames = new ByteBuffer[PARSER_CACHE_SIZE];
+    private final Parser<?>[] cachedParsers = new Parser<?>[PARSER_CACHE_SIZE];
+    private int nextParserCacheSlot;
     private final byte[] header;
     private final ByteArrayDequeue readByteQueue;
     private final AsynchronousSocketChannel socketChannel;
@@ -42,7 +52,10 @@ class SocketChannelReader {
         this.readExecutor = readExecutor;
         this.readTimeoutMillis = readTimeoutMillis;
         this.maxMessageSize = maxMessageSize;
-        this.readBuffer = ByteBuffer.allocate(readBufferCapacity);
+        // Read straight into the queue, starting small and growing only while reads fill the space offered,
+        // so that idle connections do not hold large buffers
+        this.maxReadSize = readBufferCapacity;
+        this.readSize = Math.min(INITIAL_READ_SIZE, readBufferCapacity);
         this.header = new byte[ProtobufSerializer.HEADER_LENGTH];
         this.readByteQueue = new ByteArrayDequeue();
         this.messageReadCompletionHandler = messageReadCompletionHandler;
@@ -62,11 +75,11 @@ class SocketChannelReader {
         if (readState == ReadState.STOPPED || !socketChannel.isOpen()) {
             return;
         }
-        readBuffer.clear();
+        ByteBuffer readTarget = readByteQueue.prepareWrite(readSize);
         if (readTimeoutMillis == 0) {
-            socketChannel.read(readBuffer, null, readerCompletionHandler);
+            socketChannel.read(readTarget, null, readerCompletionHandler);
         } else {
-            socketChannel.read(readBuffer, readTimeoutMillis, TimeUnit.MILLISECONDS, null, readerCompletionHandler);
+            socketChannel.read(readTarget, readTimeoutMillis, TimeUnit.MILLISECONDS, null, readerCompletionHandler);
         }
     }
 
@@ -102,10 +115,24 @@ class SocketChannelReader {
         }
         ByteBuffer protobufClassNameBytes = readByteQueue.popExactly(protobufClassNameLength);
         ByteBuffer protobufPayloadBytes = readByteQueue.popExactly(protobufPayloadLength);
-        Message message = ProtobufSerializer.deserialize(protobufClassNameBytes, protobufPayloadBytes);
+        Message message = ProtobufSerializer.parse(getParser(protobufClassNameBytes), protobufClassNameBytes, protobufPayloadBytes);
         messageReadCompletionHandler.completed(protobufPayloadLength, message);
         readState = ReadState.READING_MESSAGE_HEADER;
         return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Parser<? extends Message> getParser(ByteBuffer protobufClassName) {
+        for (int i = 0; i < PARSER_CACHE_SIZE && cachedClassNames[i] != null; i++) {
+            if (cachedClassNames[i].equals(protobufClassName)) {
+                return (Parser<? extends Message>) cachedParsers[i];
+            }
+        }
+        Parser<? extends Message> parser = ProtobufSerializer.getParser(protobufClassName);
+        cachedClassNames[nextParserCacheSlot] = ProtobufSerializer.copyOf(protobufClassName);
+        cachedParsers[nextParserCacheSlot] = parser;
+        nextParserCacheSlot = (nextParserCacheSlot + 1) % PARSER_CACHE_SIZE;
+        return parser;
     }
 
     private final class ReaderCompletionHandler implements CompletionHandler<Integer, Object> {
@@ -122,8 +149,10 @@ class SocketChannelReader {
                         return;
                     }
                     if (readLength > 0) {
-                        readBuffer.flip();
-                        readByteQueue.push(readBuffer.array(), readBuffer.position(), readBuffer.limit());
+                        readByteQueue.commitWrite(readLength);
+                        if (readLength == readSize && readSize < maxReadSize) {
+                            readSize = Math.min(readSize * 2, maxReadSize);
+                        }
 
                         boolean hasRemainingData = true;
                         while (hasRemainingData) {

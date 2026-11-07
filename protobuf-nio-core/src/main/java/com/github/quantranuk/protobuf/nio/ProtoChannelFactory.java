@@ -53,7 +53,9 @@ public final class ProtoChannelFactory {
         }
 
         /**
-         * The size of the buffer used to read from the socket channel. The default value is 8192 (8 KB)
+         * The maximum number of bytes read from the socket channel in one read. Each connection starts with small reads
+         * and grows towards this size only while reads keep filling the buffer, so idle connections stay small.
+         * The default value is 65536 (64 KB)
          * @param readBufferSize readBufferSize
          * @return builder
          */
@@ -63,7 +65,8 @@ public final class ProtoChannelFactory {
         }
 
         /**
-         * The size of the buffer used to write to the socket channel. The default value is 8192 (8 KB)
+         * The maximum number of bytes of queued messages written to the socket channel in one write. Memory is only used
+         * while messages are queued. A single message larger than this is still sent. The default value is 65536 (64 KB)
          * @param writeBufferSize writeBufferSize
          * @return builder
          */
@@ -150,8 +153,8 @@ public final class ProtoChannelFactory {
      */
     public final static class ServerBuilder {
         private final int port;
-        private int readBufferSize = DefaultSetting.DEFAULT_CLIENT_BUFFER_SIZE;
-        private int writeBufferSize = DefaultSetting.DEFAULT_CLIENT_BUFFER_SIZE;
+        private int readBufferSize = DefaultSetting.DEFAULT_SERVER_BUFFER_SIZE;
+        private int writeBufferSize = DefaultSetting.DEFAULT_SERVER_BUFFER_SIZE;
         private long readTimeoutMillis = DefaultSetting.DEFAULT_READ_TIMEOUT_MILLIS;
         private long writeTimeoutMillis = DefaultSetting.DEFAULT_WRITE_TIMEOUT_MILLIS;
         private int maxMessageSize = DefaultSetting.DEFAULT_MAX_MESSAGE_SIZE;
@@ -161,7 +164,9 @@ public final class ProtoChannelFactory {
         }
 
         /**
-         * The size of the buffer used to read from the socket channel. The default value is 8192 (8 KB)
+         * The maximum number of bytes read from the socket channel in one read. Each connection starts with small reads
+         * and grows towards this size only while reads keep filling the buffer, so idle connections stay small.
+         * The default value is 65536 (64 KB)
          * @param readBufferSize readBufferSize
          * @return builder
          */
@@ -171,7 +176,8 @@ public final class ProtoChannelFactory {
         }
 
         /**
-         * The size of the buffer used to write to the socket channel. The default value is 8192 (8 KB)
+         * The maximum number of bytes of queued messages written to the socket channel in one write. Memory is only used
+         * while messages are queued. A single message larger than this is still sent. The default value is 65536 (64 KB)
          * @param writeBufferSize writeBufferSize
          * @return builder
          */

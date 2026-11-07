@@ -1,10 +1,11 @@
 package com.github.quantranuk.protobuf.nio.serializer;
 
 import com.github.quantranuk.protobuf.nio.utils.ByteUtils;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
+import com.google.protobuf.Parser;
 
 import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -25,7 +26,7 @@ public final class ProtobufSerializer {
     public static final int HEADER_LENGTH = SIGNATURE_LENGTH + PROTO_CLASS_NAME_LENGTH + PROTO_PAYLOAD_LENGTH;
 
     private static final Charset CHARSET = StandardCharsets.ISO_8859_1;
-    private static final Map<ByteBuffer, Method> CACHED_PARSE_PROTOBUF_METHODS = new ConcurrentHashMap<>();
+    private static final Map<ByteBuffer, Parser<? extends Message>> CACHED_PARSERS = new ConcurrentHashMap<>();
 
     /**
      * <p>Serialize a protobuf message into bytes array. The bytes array will contain in this order:</p>
@@ -98,18 +99,33 @@ public final class ProtobufSerializer {
      * @return the protobuf message
      */
     public static Message deserialize(ByteBuffer protobufClassNameBuffer, ByteBuffer protobufPayloadBuffer) {
-        final Method protobufParseMethod = getParseMethod(protobufClassNameBuffer);
+        return parse(getParser(protobufClassNameBuffer), protobufClassNameBuffer, protobufPayloadBuffer);
+    }
+
+    /**
+     * Parse a protobuf payload with a parser obtained from {@link #getParser(ByteBuffer)}
+     * @param parser the parser of the message class
+     * @param protobufClassNameBuffer the buffer that contains the class name of the protobuf (used in error messages)
+     * @param protobufPayloadBuffer the buffer that contains the protobuf payload
+     * @return the protobuf message
+     */
+    public static Message parse(Parser<? extends Message> parser, ByteBuffer protobufClassNameBuffer, ByteBuffer protobufPayloadBuffer) {
         try {
-            return (Message) protobufParseMethod.invoke(null, protobufPayloadBuffer);
-        } catch (IllegalAccessException | InvocationTargetException e) {
+            return parser.parseFrom(protobufPayloadBuffer);
+        } catch (InvalidProtocolBufferException e) {
             throw new IllegalStateException("Unable to parse protobuf payload of " + CHARSET.decode(protobufClassNameBuffer.duplicate()), e);
         }
     }
 
-    private static Method getParseMethod(ByteBuffer protobufClassNameBuffer) {
-        // The lookup buffer may be a view over a reusable read buffer, so it must never be stored as a key.
-        Method parseMethod = CACHED_PARSE_PROTOBUF_METHODS.get(protobufClassNameBuffer);
-        if (parseMethod == null) {
+    /**
+     * Get the parser of the protobuf class named in the buffer. The buffer is not modified and is never retained, so it can
+     * be a view over a reusable buffer.
+     * @param protobufClassNameBuffer the buffer that contains the class name of the protobuf
+     * @return the parser of that protobuf class
+     */
+    public static Parser<? extends Message> getParser(ByteBuffer protobufClassNameBuffer) {
+        Parser<? extends Message> parser = CACHED_PARSERS.get(protobufClassNameBuffer);
+        if (parser == null) {
             String protobufClassName = CHARSET.decode(protobufClassNameBuffer.duplicate()).toString();
             final Class<?> protobufClass;
             try {
@@ -124,16 +140,26 @@ public final class ProtobufSerializer {
             }
 
             try {
-                parseMethod = protobufClass.getMethod("parseFrom", ByteBuffer.class);
-            } catch (NoSuchMethodException e) {
-                throw new IllegalStateException("Unable to get parse method from : " + protobufClassName, e);
+                Message defaultInstance = (Message) protobufClass.getMethod("getDefaultInstance").invoke(null);
+                parser = defaultInstance.getParserForType();
+            } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
+                throw new IllegalStateException("Unable to get parser of : " + protobufClassName, e);
             }
 
-            byte[] keyBytes = new byte[protobufClassNameBuffer.remaining()];
-            protobufClassNameBuffer.duplicate().get(keyBytes);
-            CACHED_PARSE_PROTOBUF_METHODS.putIfAbsent(ByteBuffer.wrap(keyBytes).asReadOnlyBuffer(), parseMethod);
+            CACHED_PARSERS.putIfAbsent(copyOf(protobufClassNameBuffer), parser);
         }
-        return parseMethod;
+        return parser;
+    }
+
+    /**
+     * Copy the remaining bytes of a buffer into a new read-only buffer, without changing the source buffer
+     * @param buffer the source buffer
+     * @return an independent read-only copy
+     */
+    public static ByteBuffer copyOf(ByteBuffer buffer) {
+        byte[] bytes = new byte[buffer.remaining()];
+        buffer.duplicate().get(bytes);
+        return ByteBuffer.wrap(bytes).asReadOnlyBuffer();
     }
 
 }
