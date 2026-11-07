@@ -181,23 +181,41 @@ If `connect()` fails, the error is logged and the `DisconnectionHandler`s are ca
 
 ## Wire format
 
+The 2.0 wire format is described here; 1.x had frames only, with no preamble or heartbeats.
+
+### Preamble
+
+Right after connecting, each side sends an 8-byte preamble once, before any frame:
+
+| Field | Size | Content |
+|---|---|---|
+| Magic | 4 bytes | `0x504E494F` (`PNIO` in ASCII) |
+| Version | 2 bytes | Highest protocol version the sender supports (currently 1) |
+| Flags | 2 bytes | Reserved: sent as 0, ignored on receipt |
+
+Each side may send frames straight after its own preamble, without waiting for the peer's. Both sides then use the lower of the two versions. The connection is closed with `PROTOCOL_MISMATCH` if the magic is wrong (for example, a 1.x peer, which starts with a frame), if the two sides have no version in common, or if no preamble arrives within the handshake timeout.
+
+### Frames
+
 Each message is sent as one frame:
 
 | Field | Size | Content |
 |---|---|---|
 | Signature | 4 bytes | `0x7A6B5C4D`, used to detect corrupt or foreign data |
-| Class name length | 4 bytes | Length *N* of the class name |
-| Payload length | 4 bytes | Length *M* of the protobuf payload |
+| Class name length | 4 bytes | Length *N* of the class name, 1 to 4096 |
+| Payload length | 4 bytes | Length *M* of the protobuf payload, 0 to the maximum message size |
 | Class name | *N* bytes | Fully qualified Java class name of the message, in ISO-8859-1 |
 | Payload | *M* bytes | The serialized protobuf message |
 
-Integers are big-endian. The receiver uses the class name to find the generated class and its parser, so:
+Integers are big-endian. A frame with both lengths 0 is a **heartbeat**: it's sent when nothing else has been sent for the heartbeat interval, it resets the peer's read timeout, and it's never passed to the application.
+
+The receiver uses the class name to find the generated class and its parser, so:
 
 - both sides must have the **same generated protobuf classes** on their classpath;
 - **renaming or moving** a message's Java class or package breaks compatibility with peers that still use the old name;
 - peers must be Java: other languages can implement the format, but they must send Java class names.
 
-The receiver only instantiates classes that implement `com.google.protobuf.Message`. Any other class name is rejected without initializing the class.
+The receiver only instantiates classes that implement `com.google.protobuf.MessageLite`. Any other class name is rejected without initializing the class.
 
 ## Dependency injection
 
