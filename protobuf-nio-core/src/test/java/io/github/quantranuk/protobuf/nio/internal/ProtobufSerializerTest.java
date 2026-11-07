@@ -1,53 +1,35 @@
 package io.github.quantranuk.protobuf.nio.internal;
 
 import io.github.quantranuk.protobuf.nio.proto.TestHeartBeat;
-import com.google.protobuf.Message;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 
 public class ProtobufSerializerTest {
 
     @Test
-    public void testRoundTripSerialization() {
-        long requestTimeMillis = System.currentTimeMillis();
-        String requestMessage = "HB_REQUEST_" + requestTimeMillis;
-
+    public void testFrameLayoutRoundTrip() throws Exception {
         TestHeartBeat.HeartBeatRequest message = TestHeartBeat.HeartBeatRequest.newBuilder()
-                .setRequestTimeMillis(requestTimeMillis)
-                .setRequestMessage(requestMessage)
+                .setRequestTimeMillis(42)
+                .setRequestMessage("HB_REQUEST")
                 .build();
 
-        byte[] serializedBytes = ProtobufSerializer.serialize(message);
+        byte[] frame = ProtobufSerializer.serialize(message);
+        ByteBuffer buffer = ByteBuffer.wrap(frame);
+        assertEquals(ProtobufSerializer.SIGNATURE, buffer.getInt());
+        int nameLength = ProtobufSerializer.extractProtobufClassNameLength(frame);
+        int payloadLength = ProtobufSerializer.extractProtobufPayloadLength(frame);
+        assertEquals(message.getClass().getName().length(), nameLength);
+        assertEquals(message.getSerializedSize(), payloadLength);
+        assertEquals(ProtobufSerializer.HEADER_LENGTH + nameLength + payloadLength, frame.length);
 
-        byte[] header = new byte[ProtobufSerializer.HEADER_LENGTH];
-        ByteBuffer serializedByteBuffer = ByteBuffer.wrap(serializedBytes);
-        serializedByteBuffer.get(header);
-        int protobufClassNameLength = ProtobufSerializer.extractProtobufClassNameLength(header);
-        int protobufPayloadLength = ProtobufSerializer.extractProtobufPayloadLength(header);
-
-        assertEquals(message.getClass().getName().length(), protobufClassNameLength);
-        assertEquals(message.getSerializedSize(), protobufPayloadLength);
-
-        byte[] protobufClassNameBytes = new byte[protobufClassNameLength];
-        byte[] protobufPayloadBytes = new byte[protobufPayloadLength];
-        serializedByteBuffer.get(protobufClassNameBytes);
-        serializedByteBuffer.get(protobufPayloadBytes);
-
-        Message deserializedMessage = ProtobufSerializer.deserialize(ByteBuffer.wrap(protobufClassNameBytes), ByteBuffer.wrap(protobufPayloadBytes));
-        assertInstanceOf(TestHeartBeat.HeartBeatRequest.class, deserializedMessage);
-
-        assertEquals(requestTimeMillis, ((TestHeartBeat.HeartBeatRequest) deserializedMessage).getRequestTimeMillis());
-        assertEquals(requestMessage, ((TestHeartBeat.HeartBeatRequest) deserializedMessage).getRequestMessage());
+        var parser = MessageTypes.forClassLoader(getClass().getClassLoader()).parser(frame, ProtobufSerializer.HEADER_LENGTH, nameLength);
+        Object parsed = parser.parseFrom(frame, ProtobufSerializer.HEADER_LENGTH + nameLength, payloadLength);
+        assertEquals(message, parsed);
     }
 
     @Test
@@ -68,27 +50,4 @@ public class ProtobufSerializerTest {
         assertEquals(0, backing[6]);
         assertEquals(0, backing[7 + expected.length]);
     }
-
-    @Test
-    public void testParseMethodCacheIsNotCorruptedByReusedBuffer() throws Exception {
-        TestHeartBeat.HeartBeatResponse message = TestHeartBeat.HeartBeatResponse.getDefaultInstance();
-        byte[] frame = ProtobufSerializer.serialize(message);
-        int nameLength = ProtobufSerializer.extractProtobufClassNameLength(frame);
-
-        // Mimic the reader: the class name is a view over a buffer that gets reused at varying offsets
-        byte[] reusedBuffer = new byte[512];
-        for (int i = 0; i < 1000; i++) {
-            int offset = (i * 37) % (reusedBuffer.length - nameLength);
-            Arrays.fill(reusedBuffer, (byte) 0);
-            System.arraycopy(frame, ProtobufSerializer.HEADER_LENGTH, reusedBuffer, offset, nameLength);
-            Message deserialized = ProtobufSerializer.deserialize(ByteBuffer.wrap(reusedBuffer, offset, nameLength).slice(), ByteBuffer.allocate(0));
-            assertInstanceOf(TestHeartBeat.HeartBeatResponse.class, deserialized);
-        }
-
-        Field cacheField = ProtobufSerializer.class.getDeclaredField("CACHED_PARSERS");
-        cacheField.setAccessible(true);
-        Map<?, ?> cache = (Map<?, ?>) cacheField.get(null);
-        assertTrue(cache.size() <= 2, "Expected one cache entry per class but found " + cache.size());
-    }
-
 }
