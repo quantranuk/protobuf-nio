@@ -14,8 +14,10 @@
     <description>Runnable examples and benchmarks for protobuf-nio. Not published.</description>
 
     <properties>
-        <!-- Not published, so no Javadoc -->
+        <!-- Not published (R4): no Javadoc or sources jar, no signatures, and left out of the Central bundle -->
         <maven.javadoc.skip>true</maven.javadoc.skip>
+        <maven.source.skip>true</maven.source.skip>
+        <gpg.skip>true</gpg.skip>
     </properties>
 
     <dependencies>
@@ -49,6 +51,13 @@
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <configuration>
+                    <skipPublishing>true</skipPublishing>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>io.github.ascopes</groupId>
