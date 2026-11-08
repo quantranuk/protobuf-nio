@@ -59,6 +59,22 @@ public class Example {
 
 protobuf-nio is a good fit for **long-lived connections between Java applications that exchange protobuf messages in both directions**: streaming updates, internal publish/subscribe, game or trading servers, telemetry, and services that push events to each other. You get framing, threading, backpressure, TLS and timeouts without adopting a framework.
 
+How it compares for that job (protobuf-nio's advantages in bold):
+
+| | protobuf-nio | gRPC, bidirectional streaming | Netty with protobuf codecs | Plain sockets with delimited protobuf |
+|---|---|---|---|---|
+| Message types per connection | **Any number, each dispatched to its own handler by type** | One request and one response type per stream method; more need a `oneof` wrapper | One per decoder; more need a wrapper message or your own type registry | One, unless you add a wrapper message |
+| Who can send, and when | **Either side, at any time, once connected** | The server sends on streams the client has opened | Either side; you write the protocol | Either side; you write the protocol |
+| What you write besides messages | **Nothing: a builder and a listener** | A service definition, generated stubs (protoc plugin) and stream observers | Pipeline, framing, codecs, handlers | Framing, threads, error handling, everything else |
+| Dependencies | **`protobuf-java` and `slf4j-api`** | Several `grpc-*` artifacts and a transport, with their own dependencies | Netty modules | None |
+| Handlers that block | **Allowed: each connection has its own virtual thread, so only that connection waits** | Run on an executor you configure; a stream's observer isn't thread-safe, so concurrent senders must synchronize | Must not block the event loop, which other connections share; offload to your own executor | Up to your own threading |
+| Backpressure | **Bounded queue per connection, four overflow policies, every message written or reported back** | Manual (`isReady`, `setOnReadyHandler`); messages sent while not ready are buffered without limit | Manual (channel writability and watermarks) | A blocked write, which never times out without extra code |
+| Closing | **Graceful by default: queued messages are flushed, and both sides read until the other is done** | Half-close with `onCompleted` | You implement it | You implement it |
+| Timeouts and heartbeats | **Connect, handshake, read, write and close timeouts, and heartbeats, built in** | Deadlines and keepalive pings | `IdleStateHandler` and your own logic | A read timeout only; no write timeout |
+| TLS | Yes (`SSLContext`) | Yes | Yes (`SslHandler`) | Yes (`SSLSocket`), handshake timeout yours to add |
+| Peers in other languages | No: Java peers with the same generated classes | Yes | Possible, with a format you define | Yes (delimited protobuf is cross-language) |
+| Proxies and load balancers | TCP (layer 4) only | HTTP/2 (layer 7) infrastructure works | Depends on your protocol | TCP (layer 4) only |
+
 Use something else when:
 
 - **The other side isn't Java,** or doesn't have the same generated classes: messages are identified by their Java class name. gRPC works across languages.
