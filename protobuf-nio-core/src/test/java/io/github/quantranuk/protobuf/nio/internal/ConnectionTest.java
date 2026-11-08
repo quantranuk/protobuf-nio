@@ -563,6 +563,60 @@ public class ConnectionTest {
     }
 
     @Test
+    public void exceptionsFromOnSendFailureAndOnDisconnectedAreIsolated() throws Exception {
+        AtomicInteger failures = new AtomicInteger();
+        AtomicInteger disconnects = new AtomicInteger();
+        AtomicInteger lateFailures = new AtomicInteger();
+        ConnectionListener throwing = new ConnectionListener() {
+            @Override
+            public void onSendFailure(MessageLite message, SendException cause) {
+                if (disconnects.get() > 0) {
+                    lateFailures.incrementAndGet();
+                }
+                if (failures.incrementAndGet() <= 3) {   // the first few throw; the rest must still be reported
+                    throw new IllegalStateException("onSendFailure boom (expected by the test)");
+                }
+            }
+
+            @Override
+            public void onDisconnected(DisconnectReason reason, Throwable cause) {
+                disconnects.incrementAndGet();
+                throw new IllegalStateException("onDisconnected boom (expected by the test)");
+            }
+        };
+        CountDownLatch gate = new CountDownLatch(1);
+        Socket[] sockets = socketPair();
+        Connection client = track(new Connection(sockets[0], config().closeTimeout(Duration.ZERO)
+                .socketOption(StandardSocketOptions.SO_SNDBUF, 4096).build(), throwing));
+        Side server = side(sockets[1], config());
+        server.events.onMessage = (connection, message) -> {
+            try {
+                gate.await();   // stops reading, so messages stay queued
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        try {
+            client.start();
+            server.connection.start();
+            client.handshake().get(5, TimeUnit.SECONDS);
+            int total = 1000;
+            for (int i = 0; i < total; i++) {
+                assertTrue(client.send(numbered(i)));
+            }
+            client.close();   // zero close timeout: closes at once, and what's queued fails
+            assertEquals(DisconnectReason.CLOSED_LOCALLY, client.awaitClosed());
+            assertEquals(1, disconnects.get());
+            assertEquals(0, lateFailures.get());
+            assertTrue(failures.get() > 3, "Only " + failures.get() + " failures");
+            assertEquals(total, client.messagesWritten() + failures.get(), "Every message written or reported");
+            assertEquals(0, client.pendingMessages());
+        } finally {
+            gate.countDown();
+        }
+    }
+
+    @Test
     public void closeFromTheListenerDoesNotDeadlock() throws Exception {
         Pair pair = connect(config(), config());
         pair.server.events.onMessage = (connection, message) -> connection.close();

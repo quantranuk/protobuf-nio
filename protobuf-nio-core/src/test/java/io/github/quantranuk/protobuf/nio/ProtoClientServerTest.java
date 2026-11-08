@@ -20,6 +20,7 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -389,6 +390,66 @@ public class ProtoClientServerTest {
         }
         assertThrows(IllegalStateException.class, server::start);
         server.close();   // idempotent
+    }
+
+    @Test
+    public void serverCloseWhileClientsAreSendingLosesNothing() throws Exception {
+        int clients = 4;
+        int perClient = 200_000;
+        BitSet[] received = new BitSet[clients];
+        BitSet[] failed = new BitSet[clients];
+        BitSet[] accepted = new BitSet[clients];
+        for (int k = 0; k < clients; k++) {
+            received[k] = new BitSet(perClient);
+            failed[k] = new BitSet(perClient);
+            accepted[k] = new BitSet(perClient);
+        }
+        AtomicInteger totalReceived = new AtomicInteger();
+        ProtoServer server = startServer(ProtoServerListener.builder().onMessage(HeartBeatRequest.class, (connection, message) -> {
+            long id = message.getRequestTimeMillis();
+            BitSet bits = received[(int) (id / perClient)];
+            synchronized (bits) {
+                bits.set((int) (id % perClient));
+            }
+            totalReceived.incrementAndGet();
+        }));
+        List<ProtoClient> started = new ArrayList<>();
+        List<Thread> senders = new ArrayList<>();
+        for (int k = 0; k < clients; k++) {
+            int client = k;
+            ProtoClient c = client(server, ProtoClientListener.builder().onSendFailure((cl, message, cause) -> {
+                if (cause.reason() != SendException.Reason.REJECTED) {
+                    synchronized (failed[client]) {
+                        failed[client].set((int) (((HeartBeatRequest) message).getRequestTimeMillis() % perClient));
+                    }
+                }
+            }));
+            c.connect();
+            started.add(c);
+            senders.add(Thread.startVirtualThread(() -> {
+                for (int i = 0; i < perClient && c.isOpen(); i++) {
+                    if (c.send(request((long) client * perClient + i))) {
+                        accepted[client].set(i);   // this thread only; read after join
+                    }
+                }
+            }));
+        }
+        awaitTrue(() -> totalReceived.get() > 50_000);
+        long start = System.nanoTime();
+        server.close();
+        assertTrue(System.nanoTime() - start < TimeUnit.SECONDS.toNanos(10), "server close() took too long");
+        assertTrue(server.connections().isEmpty());
+        for (Thread sender : senders) {
+            sender.join(10_000);
+            assertFalse(sender.isAlive());
+        }
+        for (int k = 0; k < clients; k++) {
+            assertEquals(DisconnectReason.CLOSED_BY_PEER, started.get(k).awaitClosed());
+            BitSet lost = (BitSet) accepted[k].clone();
+            lost.andNot(received[k]);
+            lost.andNot(failed[k]);
+            assertTrue(lost.isEmpty(), "Client " + k + ": " + lost.cardinality() + " accepted messages neither received nor reported");
+        }
     }
 
     @Test
