@@ -380,6 +380,20 @@ That's about 5–10 million round trips per second. One way on one connection, w
 
 Per message, the library itself allocates 24 bytes on the sending side (the queue node) and nothing on the writer; the receiving side allocates only what protobuf's parser does (about 40 bytes for a small numeric message, nothing with a [raw handler](#raw-handlers)). Results depend on hardware, message size and network: run the samples to measure your own setup.
 
+## Versioning
+
+protobuf-nio follows [Semantic Versioning](https://semver.org/), and [`CHANGELOG.md`](CHANGELOG.md) lists the changes in each release. The public API covered by it is:
+
+- **The Java API:** the types in `io.github.quantranuk.protobuf.nio`, the only package the module exports. Anything in `io.github.quantranuk.protobuf.nio.internal` may change in any release.
+- **The wire protocol:** peers with the same major version can always talk to each other. New protocol features are negotiated through the version in the [preamble](#preamble), so a newer peer still works with an older one of the same major version.
+- **The minimum Java version** (currently 25).
+
+So:
+
+- **Patch releases** (2.0.x) fix bugs.
+- **Minor releases** (2.x) add features without breaking code that compiles against the previous version. They may add builder settings, methods to `ProtoClient`, `ProtoServer` and `ProtoConnection` (which applications use but don't implement), default methods to the listener interfaces, and constants to the enums: give a `switch` over `DisconnectReason` or `SendException.Reason` a `default` branch.
+- **Major releases** may change or remove API, change the wire protocol incompatibly, or raise the minimum Java version.
+
 ## Building
 
 ```bash
