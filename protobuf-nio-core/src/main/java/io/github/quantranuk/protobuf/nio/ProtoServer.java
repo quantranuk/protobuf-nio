@@ -181,7 +181,10 @@ public interface ProtoServer extends AutoCloseable {
         }
 
         /**
-         * Connections beyond this are closed as soon as they're accepted. Default: unlimited.
+         * Caps the number of connections, including those still in their handshake. At the limit, a new connection
+         * replaces the oldest connection still in its handshake, which is closed without being reported to the listener,
+         * so peers that connect and stay silent can't hold every slot; if every connection has finished its handshake,
+         * the new connection is closed at once. Default: unlimited.
          *
          * @param max the limit; must be positive
          * @return this builder

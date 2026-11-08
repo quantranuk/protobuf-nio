@@ -52,7 +52,7 @@ final class MessageTypes {
         ByteBuffer name = ByteBuffer.wrap(bytes, offset, length);
         Parser<? extends MessageLite> parser = parsers.get(name);
         if (parser == null) {
-            parser = resolve(new String(bytes, offset, length, ProtobufSerializer.CHARSET));
+            parser = resolve(new String(bytes, offset, length, ProtobufSerializer.CHARSET), Protocol.quotableName(bytes, offset, length));
             byte[] copy = new byte[length];
             System.arraycopy(bytes, offset, copy, 0, length);
             parsers.putIfAbsent(ByteBuffer.wrap(copy).asReadOnlyBuffer(), parser);
@@ -71,21 +71,25 @@ final class MessageTypes {
         return parsers.size();
     }
 
-    private Parser<? extends MessageLite> resolve(String className) throws ProtocolException {
+    /**
+     * @param className the class name from the peer
+     * @param quoted    the same, made safe for exception messages (see {@link Protocol#quotableName})
+     */
+    private Parser<? extends MessageLite> resolve(String className, String quoted) throws ProtocolException {
         final Class<?> type;
         try {
             // Don't initialise the class until it's known to be a protobuf message: the name comes from the network
             type = Class.forName(className, false, loader);
         } catch (ClassNotFoundException | LinkageError e) {
-            throw protocolException("Unknown message class: " + className, e);
+            throw protocolException("Unknown message class: " + quoted, e);
         }
         if (!MessageLite.class.isAssignableFrom(type)) {
-            throw new ProtocolException("Not a protobuf message class: " + className);
+            throw new ProtocolException("Not a protobuf message class: " + quoted);
         }
         try {
             return parserOf(type);
         } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
-            throw protocolException("Unable to get the parser of " + className + ": " + e.getMessage(), e);
+            throw protocolException("Unable to get the parser of " + quoted + ": " + e.getMessage(), e);
         }
     }
 

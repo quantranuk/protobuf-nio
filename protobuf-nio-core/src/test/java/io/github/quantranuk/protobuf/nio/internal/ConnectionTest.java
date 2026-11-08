@@ -326,6 +326,50 @@ public class ConnectionTest {
         assertTrue(requested.isEmpty(), "Class loader asked for " + requested);
     }
 
+    static Stream<Arguments> typesRejectedBeforeTheirPayload() {
+        return Stream.of(
+                Arguments.of("disallowed type", config().allowedMessageTypes(HeartBeatRequest.class),
+                        HeartBeatResponse.class.getName(), "Message type not allowed: "),
+                Arguments.of("unknown class", config(), "com.example.DoesNotExist", "Unknown message class: "));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("typesRejectedBeforeTheirPayload")
+    public void aBadTypeIsRejectedBeforeItsPayloadArrives(String description, ConnectionConfig.Builder config, String name,
+                                                           String error) throws Exception {
+        RawPeer peer = rawPeer(config);
+        byte[] nameBytes = name.getBytes(StandardCharsets.ISO_8859_1);
+        peer.out.write(Protocol.PREAMBLE);
+        peer.out.write(header(ProtobufSerializer.SIGNATURE, nameBytes.length, 32 * 1024 * 1024));
+        peer.out.write(nameBytes);   // and none of the announced 32 MB payload
+        Disconnect disconnect = peer.events.disconnects.poll(5, TimeUnit.SECONDS);
+        assertNotNull(disconnect, "Waited for the payload of a type it should have rejected");
+        assertEquals(DisconnectReason.PROTOCOL_ERROR, disconnect.reason);
+        assertEquals(error + name, disconnect.cause.getMessage());
+    }
+
+    @Test
+    public void classNamesFromThePeerAreEscapedInErrors() throws Exception {
+        RawPeer peer = rawPeer(config());
+        peer.out.write(Protocol.PREAMBLE);
+        byte[] name = "x\r\nFAKE LOG LINE\u001B[31m\u00E9\\".getBytes(StandardCharsets.ISO_8859_1);
+        peer.out.write(frame(name, new byte[0]));
+        Disconnect disconnect = peer.events.disconnects.poll(5, TimeUnit.SECONDS);
+        assertNotNull(disconnect);
+        assertEquals("Unknown message class: x\\x0D\\x0AFAKE LOG LINE\\x1B[31m\\xE9\\x5C", disconnect.cause.getMessage());
+    }
+
+    @Test
+    public void longClassNamesAreCutInErrors() throws Exception {
+        RawPeer peer = rawPeer(config());
+        peer.out.write(Protocol.PREAMBLE);
+        peer.out.write(frame("a".repeat(Protocol.MAX_CLASS_NAME_LENGTH).getBytes(StandardCharsets.ISO_8859_1), new byte[0]));
+        Disconnect disconnect = peer.events.disconnects.poll(5, TimeUnit.SECONDS);
+        assertNotNull(disconnect);
+        assertEquals("Unknown message class: " + "a".repeat(Protocol.MAX_QUOTED_NAME_LENGTH) + "... (4096 bytes)",
+                disconnect.cause.getMessage());
+    }
+
     @Test
     public void allowlistRejectsInvalidTypes() {
         assertThrows(IllegalArgumentException.class, () -> config().allowedMessageTypes());
@@ -981,6 +1025,45 @@ public class ConnectionTest {
     }
 
     // ------------------------------------------------------------------ memory
+
+    @Test
+    public void aFrameMuchLargerThanTheReadBufferIsDelivered() throws Exception {
+        // Big frames grow the buffer step by step as their bytes arrive
+        Pair pair = connect(config(), config().readBufferSize(ConnectionConfig.MIN_BUFFER_SIZE));
+        String big = "y".repeat(3_000_000);
+        pair.client.connection.send(request(big));
+        pair.client.connection.send(request("after"));
+        assertEquals(big, ((HeartBeatRequest) pair.server.events.messages.poll(10, TimeUnit.SECONDS)).getRequestMessage());
+        assertEquals("after", ((HeartBeatRequest) pair.server.events.messages.poll(5, TimeUnit.SECONDS)).getRequestMessage());
+    }
+
+    @Test
+    public void announcingAHugeFrameThenStallingCostsLittleMemory() throws Exception {
+        // Each peer announces a 64 MB payload (the default maxMessageSize), sends 100 KB of it, and stalls. Memory must
+        // follow what was sent (at most twice), not what was announced: 16 peers would otherwise hold 1 GB.
+        int peers = 16;
+        int sent = 100 * 1024;
+        byte[] name = HeartBeatRequest.class.getName().getBytes(StandardCharsets.ISO_8859_1);
+        long before = usedHeapAfterGc();
+        List<RawPeer> stalled = new ArrayList<>();
+        for (int i = 0; i < peers; i++) {
+            RawPeer peer = rawPeer(config());
+            peer.out.write(Protocol.PREAMBLE);
+            peer.out.write(header(ProtobufSerializer.SIGNATURE, name.length, 64 * 1024 * 1024));
+            peer.out.write(name);
+            peer.out.write(new byte[sent]);
+            peer.out.flush();
+            stalled.add(peer);
+        }
+        Thread.sleep(500);   // let every reader take in what was sent
+        long perPeer = (usedHeapAfterGc() - before) / peers;
+        System.out.printf("Heap per peer stalled in a 64 MB frame after sending %d KB: %d KB%n", sent / 1024, perPeer / 1024);
+        for (RawPeer peer : stalled) {
+            assertTrue(peer.connection.isOpen());
+            assertTrue(peer.events.disconnects.isEmpty());
+        }
+        assertTrue(perPeer < 4L * sent, "Heap per stalled peer: " + perPeer + " bytes");
+    }
 
     @Test
     public void idleConnectionsStaySmall() throws Exception {

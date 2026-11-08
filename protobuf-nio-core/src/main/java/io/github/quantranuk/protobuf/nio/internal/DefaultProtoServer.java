@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.SocketOption;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -21,6 +22,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 
@@ -28,6 +30,9 @@ import java.util.function.Predicate;
  * {@link ProtoServer} with a blocking accept loop on its own thread. Every accepted socket becomes a
  * {@link DefaultProtoConnection}, tracked in {@code all} until it has closed; it's in {@code open} from
  * {@code onConnected} to {@code onDisconnected}.
+ * <p>
+ * At {@code maxConnections}, a new connection replaces the oldest one still in its handshake, so peers that connect
+ * and stay silent can't hold every slot; without one, the new connection is closed.
  */
 public final class DefaultProtoServer implements ProtoServer {
 
@@ -38,6 +43,9 @@ public final class DefaultProtoServer implements ProtoServer {
     private static final int RUNNING = 2;
     private static final int CLOSING = 3;
     private static final int CLOSED = 4;
+
+    /** At most one warning per interval for each kind, so a connection flood doesn't become a log flood. */
+    private static final long WARNING_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(10);
 
     private final InetSocketAddress bindAddress;
     private final int backlog;
@@ -53,6 +61,9 @@ public final class DefaultProtoServer implements ProtoServer {
     private volatile boolean started;
     private volatile ServerSocket serverSocket;
     private volatile Thread acceptor;
+    // Acceptor thread only
+    private final Throttle limitWarnings = new Throttle();
+    private final Throttle acceptFailureWarnings = new Throttle();
 
     public DefaultProtoServer(InetSocketAddress bindAddress, int backlog, int maxConnections, ConnectionConfig config,
                               ProtoServerListener listener) {
@@ -102,12 +113,19 @@ public final class DefaultProtoServer implements ProtoServer {
                 if (state.get() != RUNNING) {
                     return;
                 }
-                LOG.warn("{}: accept failed", this, e);   // e.g. out of file descriptors: don't spin
-                pause();
+                int suppressed = acceptFailureWarnings.tryAcquire();
+                if (suppressed >= 0) {
+                    LOG.warn("{}: accept failed ({} more failures not logged since the last warning)", this, suppressed, e);
+                }
+                pause();   // e.g. out of file descriptors: don't spin
                 continue;
             }
-            if (all.size() >= maxConnections) {
-                LOG.warn("{}: maxConnections ({}) reached, closing the connection from {}", this, maxConnections, accepted.getRemoteSocketAddress());
+            if (all.size() >= maxConnections && !evictOldestHandshaking()) {
+                int suppressed = limitWarnings.tryAcquire();
+                if (suppressed >= 0) {
+                    LOG.warn("{}: maxConnections ({}) reached, closing the connection from {} ({} more not logged since the last warning)",
+                            this, maxConnections, accepted.getRemoteSocketAddress(), suppressed);
+                }
                 closeQuietly(accepted);
                 continue;
             }
@@ -119,6 +137,34 @@ public final class DefaultProtoServer implements ProtoServer {
             } catch (IOException | RuntimeException e) {
                 LOG.debug("{}: unable to start {}", this, connection, e);
             }
+        }
+    }
+
+    /**
+     * Closes the oldest connection still in its handshake, to make room for a new one. It's never reported to the
+     * listener. Acceptor thread only.
+     *
+     * @return false if every connection has finished its handshake
+     */
+    private boolean evictOldestHandshaking() {
+        while (true) {
+            DefaultProtoConnection oldest = null;
+            for (DefaultProtoConnection connection : all.values()) {
+                if (connection.connection.isHandshaking() && (oldest == null || connection.id() < oldest.id())) {
+                    oldest = connection;
+                }
+            }
+            if (oldest == null) {
+                return false;
+            }
+            if (oldest.connection.abortHandshake(new SocketException(
+                    "Closed during the handshake to make room for a new connection (maxConnections " + maxConnections + ")"))) {
+                all.remove(oldest.id());   // its slot is free now, though its threads take a moment to finish
+                LOG.debug("{}: maxConnections ({}) reached, closed {} (still in its handshake) to accept a new connection",
+                        this, maxConnections, oldest);
+                return true;
+            }
+            // It finished its handshake meanwhile: look again
         }
     }
 
@@ -264,6 +310,27 @@ public final class DefaultProtoServer implements ProtoServer {
             closeable.close();
         } catch (Exception e) {
             LOG.debug("Error while closing {}", closeable, e);
+        }
+    }
+
+    /** Rate limit for one kind of warning. Not thread-safe: used by the acceptor thread only. */
+    private static final class Throttle {
+        private boolean logged;
+        private long lastNanos;
+        private int suppressed;
+
+        /** @return the number of warnings suppressed since the last one, or -1 to suppress this one */
+        int tryAcquire() {
+            long now = System.nanoTime();
+            if (logged && now - lastNanos < WARNING_INTERVAL_NANOS) {
+                suppressed++;
+                return -1;
+            }
+            logged = true;
+            lastNanos = now;
+            int count = suppressed;
+            suppressed = 0;
+            return count;
         }
     }
 

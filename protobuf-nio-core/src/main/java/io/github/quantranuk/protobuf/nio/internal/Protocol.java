@@ -23,12 +23,42 @@ public final class Protocol {
     public static final int MIN_VERSION = 1;
     /** Upper bound for the class name length of a frame. */
     public static final int MAX_CLASS_NAME_LENGTH = 4096;
+    /** Longest class name quoted in an exception message; longer ones are cut. */
+    static final int MAX_QUOTED_NAME_LENGTH = 256;
 
     static final byte[] PREAMBLE = preamble(VERSION, 0);
     static final byte[] HEARTBEAT_FRAME = ByteBuffer.allocate(ProtobufSerializer.HEADER_LENGTH)
             .putInt(ProtobufSerializer.SIGNATURE).putInt(0).putInt(0).array();
 
     private Protocol() {
+    }
+
+    /**
+     * A class name received from the peer, made safe to put in an exception message (which applications may log):
+     * characters outside printable ASCII are escaped as {@code \xNN}, so a peer can't inject line breaks or terminal
+     * control sequences, and names longer than {@link #MAX_QUOTED_NAME_LENGTH} are cut. Real Java class names come
+     * through unchanged.
+     *
+     * @param bytes  buffer holding the ISO-8859-1 name
+     * @param offset start of the name
+     * @param length length of the name
+     * @return the quotable name
+     */
+    static String quotableName(byte[] bytes, int offset, int length) {
+        int shown = Math.min(length, MAX_QUOTED_NAME_LENGTH);
+        StringBuilder out = new StringBuilder(shown + 16);
+        for (int i = offset; i < offset + shown; i++) {
+            int c = bytes[i] & 0xFF;
+            if (c >= 0x20 && c < 0x7F && c != '\\') {
+                out.append((char) c);
+            } else {
+                out.append(String.format("\\x%02X", c));
+            }
+        }
+        if (shown < length) {
+            out.append("... (").append(length).append(" bytes)");
+        }
+        return out.toString();
     }
 
     /** @return a preamble with the given fields (tests use other values) */

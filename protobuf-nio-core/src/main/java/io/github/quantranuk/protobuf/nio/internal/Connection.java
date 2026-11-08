@@ -287,6 +287,11 @@ public final class Connection {
     }
 
     /** @return true after the handshake, until closing starts */
+    /** @return true until the handshake has finished or the connection has closed */
+    public boolean isHandshaking() {
+        return state.get() == HANDSHAKING;
+    }
+
     public boolean isOpen() {
         return state.get() == OPEN;
     }
@@ -596,18 +601,37 @@ public final class Connection {
     private void terminate(Termination t) {
         termination.compareAndSet(null, t);
         if (state.getAndSet(CLOSED) != CLOSED) {
-            try {
-                socket.close();
-            } catch (IOException e) {
-                LOG.debug("{}: error closing the socket", this, e);
-            }
-            socketClosed.countDown();
-            if (tlsReady != null) {
-                tlsReady.countDown();   // a writer still waiting for the TLS handshake gives up
-            }
-            LockSupport.unpark(writer);
-            wakeBlockedSenders();
+            closeSocket();
         }
+    }
+
+    /**
+     * Closes the connection at once, but only if its handshake hasn't finished, so the listener never hears of it. A
+     * server uses it to free a slot held by a peer that connected and stayed silent.
+     *
+     * @return true if it closed the connection; false if the handshake had already finished (or the connection closed)
+     */
+    public boolean abortHandshake(Throwable cause) {
+        if (!state.compareAndSet(HANDSHAKING, CLOSED)) {
+            return false;
+        }
+        termination.compareAndSet(null, new Termination(DisconnectReason.CLOSED_LOCALLY, cause));
+        closeSocket();
+        return true;
+    }
+
+    private void closeSocket() {
+        try {
+            socket.close();
+        } catch (IOException e) {
+            LOG.debug("{}: error closing the socket", this, e);
+        }
+        socketClosed.countDown();
+        if (tlsReady != null) {
+            tlsReady.countDown();   // a writer still waiting for the TLS handshake gives up
+        }
+        LockSupport.unpark(writer);
+        wakeBlockedSenders();
     }
 
     /** Called periodically by the watchdog. */
@@ -724,15 +748,23 @@ public final class Connection {
                 throw new ProtocolException(
                         "Payload length out of range: " + payloadLength + " (maxMessageSize " + config.maxMessageSize + ")");
             }
-            int frameLength = HEADER_LENGTH + nameLength + payloadLength;
+            int nameEnd = HEADER_LENGTH + nameLength;
+            if (available < nameEnd) {
+                if (!fill(in, nameEnd)) {
+                    return;
+                }
+                continue;
+            }
+            // Resolved before the payload is read, so an unknown or disallowed type is rejected without buffering it
+            int nameOffset = position + HEADER_LENGTH;
+            Object target = target(buffer, nameOffset, nameLength);
+            int frameLength = nameEnd + payloadLength;
             if (available < frameLength) {
                 if (!fill(in, frameLength)) {
                     return;
                 }
                 continue;
             }
-            int nameOffset = position + HEADER_LENGTH;
-            Object target = target(buffer, nameOffset, nameLength);
             if (target instanceof ConnectionConfig.RawHandler raw) {
                 readStart += frameLength;   // the buffer isn't touched again until the handler returns
                 notifyRawMessage(raw, buffer, nameOffset + nameLength, payloadLength);
@@ -751,7 +783,7 @@ public final class Connection {
             return (MessageLite) parser.parseFrom(buffer, nameOffset + nameLength, payloadLength);
         } catch (IOException | RuntimeException e) {
             throw MessageTypes.protocolException(
-                    "Unable to parse a " + new String(buffer, nameOffset, nameLength, ProtobufSerializer.CHARSET), e);
+                    "Unable to parse a " + Protocol.quotableName(buffer, nameOffset, nameLength), e);
         }
     }
 
@@ -781,7 +813,7 @@ public final class Connection {
     private Parser<?> allowedParser(byte[] buffer, int offset, int length) throws ProtocolException {
         Parser<?> parser = config.allowedTypes.get(ByteBuffer.wrap(buffer, offset, length));
         if (parser == null) {
-            throw new ProtocolException("Message type not allowed: " + new String(buffer, offset, length, ProtobufSerializer.CHARSET));
+            throw new ProtocolException("Message type not allowed: " + Protocol.quotableName(buffer, offset, length));
         }
         return parser;
     }
@@ -800,16 +832,24 @@ public final class Connection {
     }
 
     /**
-     * Makes room for {@code needed} bytes from {@code readStart}, then reads at least one more byte.
+     * Makes room towards {@code needed} bytes from {@code readStart}, then reads at least one more byte. The caller loops
+     * until it has them.
+     * <p>
+     * A frame bigger than the buffer doesn't get a buffer of its full declared size at once: the buffer grows only when
+     * the bytes received fill it, and then to at most twice those bytes. Otherwise a peer could announce a huge payload
+     * in a 12-byte header, then stall, and hold that much memory for nothing.
+     *
+     * @param needed bytes wanted from {@code readStart}; more than are pending
      * @return false at the end of stream
      */
     private boolean fill(InputStream in, int needed) throws IOException {
         byte[] buffer = readBuffer;
         int pending = readEnd - readStart;
         int capacity = buffer.length;
-        if (needed > capacity || (growReadBuffer && capacity < config.readBufferSize)) {
+        int wanted = (int) Math.min(needed, Math.max(INITIAL_BUFFER_SIZE, 2L * pending));
+        if (wanted > capacity || (growReadBuffer && capacity < config.readBufferSize)) {
             int grown = capacity < INITIAL_BUFFER_SIZE ? INITIAL_BUFFER_SIZE : (int) Math.min(2L * capacity, Integer.MAX_VALUE);
-            grown = Math.max(needed, Math.min(grown, config.readBufferSize));
+            grown = Math.max(wanted, Math.min(grown, config.readBufferSize));
             replaceReadBuffer(new byte[grown], pending);
         } else if (pending == 0) {
             if (capacity > config.readBufferSize) {
@@ -818,7 +858,7 @@ public final class Connection {
             }
             readStart = 0;
             readEnd = 0;
-        } else if (readStart > 0 && (readStart + needed > capacity || capacity - readEnd < capacity / 8)) {
+        } else if (readStart > 0 && (readStart + wanted > capacity || capacity - readEnd < capacity / 8)) {
             replaceReadBuffer(buffer, pending);   // compact
         }
         while (true) {

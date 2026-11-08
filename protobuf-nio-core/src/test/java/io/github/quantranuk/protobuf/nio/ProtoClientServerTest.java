@@ -492,6 +492,56 @@ public class ProtoClientServerTest {
     }
 
     @Test
+    public void atMaxConnectionsSilentPeersMakeRoomForNewConnections() throws Exception {
+        AtomicInteger serverCalls = new AtomicInteger();
+        ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0)).maxConnections(2)
+                .listener(new ProtoServerListener() {
+                    @Override
+                    public void onConnected(ProtoConnection connection) {
+                        serverCalls.incrementAndGet();
+                    }
+
+                    @Override
+                    public void onDisconnected(ProtoConnection connection, DisconnectReason reason, Throwable cause) {
+                        serverCalls.incrementAndGet();
+                    }
+                }));
+        // Two peers connect and never send a preamble: they hold both slots
+        Socket silent1 = track(new Socket(LOOPBACK, server.localAddress().getPort()));
+        Socket silent2 = track(new Socket(LOOPBACK, server.localAddress().getPort()));
+
+        client(server, ProtoClientListener.builder()).connect();   // replaces silent1, the oldest still in its handshake
+        assertClosedByServer(silent1);
+        assertOpen(silent2);
+        client(server, ProtoClientListener.builder()).connect();   // replaces silent2
+        assertClosedByServer(silent2);
+
+        // Both slots are now open connections, which are never replaced
+        assertThrows(IOException.class, client(server, ProtoClientListener.builder())::connect);
+        assertEquals(2, server.connections().size());
+        assertEquals(2, serverCalls.get(), "only the two clients' onConnected; the silent peers were never reported");
+    }
+
+    /** Skips the server's preamble and reads until the end of stream; a reset also counts as closed. */
+    private static void assertClosedByServer(Socket socket) throws IOException {
+        socket.setSoTimeout(5000);
+        try {
+            while (socket.getInputStream().read() >= 0) {
+                // skip
+            }
+        } catch (java.net.SocketException e) {
+            assertTrue(String.valueOf(e.getMessage()).contains("reset"), e.toString());
+        }
+    }
+
+    private static void assertOpen(Socket socket) throws IOException {
+        socket.setSoTimeout(300);
+        byte[] preamble = new byte[Protocol.PREAMBLE_LENGTH];
+        socket.getInputStream().readNBytes(preamble, 0, preamble.length);   // the server's preamble
+        assertThrows(java.net.SocketTimeoutException.class, () -> socket.getInputStream().read(), "closed by the server");
+    }
+
+    @Test
     public void connectedListenerExceptionDoesNotStopAccepting() throws Exception {
         BlockingQueue<MessageLite> received = new LinkedBlockingQueue<>();
         ProtoServer server = startServer(ProtoServerListener.builder()

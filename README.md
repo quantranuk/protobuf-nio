@@ -214,7 +214,7 @@ Server only:
 | Setting | Default | Description |
 |---|---|---|
 | `backlog(count)` | 1024 | Pending connections the operating system may queue before `accept`. |
-| `maxConnections(count)` | unlimited | Connections beyond this are closed as soon as they're accepted. |
+| `maxConnections(count)` | unlimited | At the limit, a new connection replaces the oldest one still in its handshake (peers that connect and stay silent can't hold every slot); if there's none, the new connection is closed at once. |
 | `tlsClientAuth(mode)` | `NONE` | With TLS, whether clients must present a certificate: `NONE`, `WANT` or `NEED`. |
 
 The server also turns on `SO_REUSEADDR` by default. `ProtoServer.builder(0)` binds to any free port; `server.localAddress()` tells you which.
@@ -250,9 +250,35 @@ ProtoServer.builder(3456)
         .allowedMessageTypes(LoginRequest.class, OrderRequest.class)
 ```
 
-A message of any other type then disconnects the peer with `PROTOCOL_ERROR`, and its class name is checked against the list before any class is loaded. Even without a list, the receiver only uses classes that implement `com.google.protobuf.MessageLite`, and checks that before initializing the class.
+A message of any other type then disconnects the peer with `PROTOCOL_ERROR`, and its class name is checked against the list before any class is loaded, and before its payload is read. Even without a list, the receiver only uses classes that implement `com.google.protobuf.MessageLite`, and checks that before initializing the class.
 
-Also consider `maxMessageSize` (each received message is held in memory whole), `readTimeout`, `maxConnections`, and TLS with `TlsClientAuth.NEED`.
+### Hardening checklist
+
+The defaults suit services on a trusted network. For a server that untrusted peers can reach:
+
+- **`allowedMessageTypes(...)`**: accept only the types you expect.
+- **`maxMessageSize(bytes)`**: each received message is held in memory whole, so set it to the largest message you really expect, rather than the 64 MiB default. Memory follows what a peer actually sends (a peer that announces a large message and stalls costs only what it sent), but a peer that does send a whole large message makes the receiver hold it.
+- **`readTimeout(duration)`** on the server, with **`heartbeatInterval(duration)`** below it on the clients: peers that go quiet are disconnected instead of holding a connection forever.
+- **`maxConnections(count)`**: caps file descriptors and memory. Peers still in their handshake are replaced first when the limit is reached, and a short `handshakeTimeout` limits how long they can hold a slot.
+- **`maxPendingBytes(bytes)`** and **`maxPendingMessages(count)`**: bound what's queued for a peer that reads slowly (the defaults allow 64 MiB per connection), and choose an `overflowPolicy` such as `DISCONNECT` for consumers that fall behind.
+- **TLS with `tlsClientAuth(TlsClientAuth.NEED)`** when only known clients may connect: a peer without a trusted certificate is rejected before it can send anything.
+
+```java
+ProtoServer server = ProtoServer.builder(8443)
+        .tls(serverContext)
+        .tlsClientAuth(TlsClientAuth.NEED)
+        .allowedMessageTypes(LoginRequest.class, OrderRequest.class)
+        .maxMessageSize(1024 * 1024)
+        .readTimeout(Duration.ofSeconds(30))         // clients send heartbeats every 10 s
+        .handshakeTimeout(Duration.ofSeconds(5))
+        .maxConnections(10_000)
+        .maxPendingBytes(4 * 1024 * 1024)
+        .overflowPolicy(OverflowPolicy.DISCONNECT)
+        .listener(listener)
+        .build();
+```
+
+Class names that a peer sends are quoted in exception messages (the `cause` passed to `onDisconnected`) with control and non-ASCII characters escaped, so logging them is safe.
 
 ## TLS
 
@@ -300,7 +326,7 @@ Threads aren't the limit: virtual threads are cheap, and an idle connection cost
 - **Ephemeral ports.** Each client connection from one machine to one server address uses a local port, from `net.ipv4.ip_local_port_range` on Linux (32768–60999 by default, about 28,000). When the client closes first, its port stays in `TIME_WAIT` for a minute. Many clients on one machine may need a wider range or several server addresses; servers don't have this limit.
 - **Accept backlog.** A burst of connections larger than `backlog` (default 1024) can overflow the operating system's queue, and those clients retry after a delay. `net.core.somaxconn` caps it on Linux.
 - **Send queue memory.** Queues are bounded per connection: with many connections, lower `maxPendingBytes` so that the worst case (every connection's queue full) fits in the heap.
-- `maxConnections` caps the server's connections.
+- `maxConnections` caps the server's connections. At the limit, a new connection replaces the oldest one still in its handshake, if any.
 
 `MultiClientsTest` connects, uses and closes 15,000 clients against `SampleServer` in about a second.
 
