@@ -53,7 +53,7 @@ public class Example {
 - **Simple threading:** each connection's callbacks run in order on its own virtual thread. A handler may block; that stalls only its own connection.
 - **Backpressure:** bounded send queues with a choice of overflow policy (block, reject, drop oldest, disconnect), and every message you send is either written or reported back to you.
 - **Production features:** TLS, timeouts, heartbeats, graceful close, connection limits, and an allowlist of accepted message types for untrusted peers.
-- **Fast and lean:** about 7 million pipelined request/response round trips per second on one connection, and about 7 KB of heap per idle connection (see [Performance](#performance)). Sending allocates nothing per message beyond a queue node.
+- **Fast and lean:** about 7.5 million pipelined request/response round trips per second on one connection, and about 6 to 8 KB of heap per idle connection (see [Performance](#performance)). Sending allocates nothing per message beyond a queue node.
 
 ## When to use it
 
@@ -84,6 +84,68 @@ Use something else when:
 Compared with plain sockets, protobuf-nio is the part you'd otherwise write yourself: message framing, a reader and writer per connection, bounded queues, a protocol handshake, heartbeats, write timeouts, and closing without losing data.
 
 > **Limitations:** both peers must be Java and have the same generated protobuf classes on their classpath (see [Wire format](#wire-format)).
+
+## Performance
+
+Measured on one machine over loopback: an AMD Ryzen 7 9800X3D (8 cores, 16 threads), 30 GB of RAM, JDK 25 on Linux (WSL2), with the default settings.
+
+| Measurement | Result |
+|---|---|
+| Pipelined request/response on one connection | **about 7.5 million round trips per second** (5.4 to 9.9 million over 20 rounds), so about 15 million messages per second across both directions |
+| One way on one connection, small messages | about 9 to 11 million messages per second |
+| The same over TLS 1.3 | about 6 to 8 million messages per second |
+| 15,000 clients on one server | all connected in 0.5 s, one request and response each in 0.2 s, all closed in 0.2 s |
+| Heap per idle connection | about 6 to 8 KB |
+| Library allocation per message | 24 bytes on the sending side, none on the writer, none on the reader beyond protobuf's own parsing |
+
+### Throughput
+
+`SampleClientBenchmarkTest` sends 1,000,000 requests to `SampleServer` on one connection without waiting, and waits for all 1,000,000 responses; it does this 10 times after a warm-up of 200,000. Each request and response is built and parsed in full: a frame of about 100 bytes, that is the 12-byte header, the 67-byte class name and about 20 bytes of payload (a timestamp and a short string). At 7.5 million round trips per second, that's about 750 MB/s in each direction. A typical run, with the server already warm:
+
+```
+Round 1: 1000000 round trips in 129 ms, 7747 round trips per millisecond
+Round 2: 1000000 round trips in 135 ms, 7365 round trips per millisecond
+Round 3: 1000000 round trips in 124 ms, 8034 round trips per millisecond
+Round 4: 1000000 round trips in 100 ms, 9916 round trips per millisecond
+Round 5: 1000000 round trips in 185 ms, 5400 round trips per millisecond
+```
+
+The one-way figures come from a separate probe that isn't in the repository yet.
+
+### Why it's fast
+
+- **Batching:** a connection's writer takes everything queued and writes it in one socket write, and its reader takes in as much as has arrived and parses every complete frame from it. Under load, one system call carries many messages.
+- **No garbage per message:** frames are encoded straight into a reused buffer by a reused encoder, and each class name is encoded once per class. The only allocation the library makes per message is the queue node.
+- **Virtual threads:** each connection gets plain blocking I/O and a simple, ordered reader and writer, without costing a platform thread. An idle connection's threads are parked, and its buffers are released after a second.
+- **`TCP_NODELAY` on by default:** replies go out at once instead of waiting for the operating system to merge small packets; batching keeps the packet count down anyway.
+- **Raw handlers** skip parsing altogether for the message types you choose (see [Raw handlers](#raw-handlers)).
+
+### Memory per connection
+
+An idle connection costs about 6 to 8 KB of heap, mostly the stacks of its two parked virtual threads. While busy, a connection's read buffer grows only as far as `readBufferSize` (64 KB by default) and its write buffer as far as `writeBufferSize` (64 KB); both shrink back after a second of idleness. Messages waiting to be written are bounded by `maxPendingBytes` and `maxPendingMessages`.
+
+### Allocation per message
+
+`AllocationTest` measures what each thread allocates per message:
+
+| Message | Sending thread | Writer | Reader |
+|---|---|---|---|
+| Small numeric message | 24 B (the queue node) | 0 | 40 B, protobuf's parsing (0 with a raw handler) |
+| With a string field | 24 B | about 24 B, protobuf encoding the string | about 90 to 150 B, protobuf creating the string |
+
+The allocations for string fields are protobuf's own, not the library's.
+
+### Measuring it yourself
+
+After `./mvnw install`, start the server and run the benchmark or the many-clients test in another terminal:
+
+```bash
+./mvnw -q -pl protobuf-nio-sample exec:java -Dexec.mainClass=io.github.quantranuk.protobuf.nio.sample.SampleServer
+./mvnw -q -pl protobuf-nio-sample exec:java -Dexec.mainClass=io.github.quantranuk.protobuf.nio.sample.SampleClientBenchmarkTest
+./mvnw -q -pl protobuf-nio-sample exec:java -Dexec.mainClass=io.github.quantranuk.protobuf.nio.sample.MultiClientsTest
+```
+
+`./mvnw test -pl protobuf-nio-core -Dtest=AllocationTest` prints the allocations. These are loopback figures: on a real network, bandwidth and round-trip time set the limits, and results also depend on message size and hardware.
 
 ## Requirements
 
@@ -392,7 +454,7 @@ On the classpath, nothing is needed.
 
 ## Connection limits
 
-Threads aren't the limit: virtual threads are cheap, and an idle connection costs about 7 KB of heap, mostly its two parked thread stacks. Its read and write buffers are released after a second of idleness. What limits the number of connections is the operating system:
+Threads aren't the limit: virtual threads are cheap, and an idle connection costs about 6 to 8 KB of heap, mostly its two parked thread stacks. Its read and write buffers are released after a second of idleness. What limits the number of connections is the operating system:
 
 - **File descriptors.** Each connection is one file descriptor on each side. Raise `ulimit -n` (and `LimitNOFILE` for a systemd service) above the number of connections you expect, plus the JVM's own files.
 - **Ephemeral ports.** Each client connection from one machine to one server address uses a local port, from `net.ipv4.ip_local_port_range` on Linux (32768–60999 by default, about 28,000). When the client closes first, its port stays in `TIME_WAIT` for a minute. Many clients on one machine may need a wider range or several server addresses; servers don't have this limit.
@@ -435,22 +497,6 @@ The receiver uses the class name to find the generated class and its parser, so:
 - both sides must have the **same generated protobuf classes** on their classpath;
 - **renaming or moving** a message's Java class or package breaks compatibility with peers that still use the old name;
 - peers must be Java: other languages can implement the format, but they must send Java class names.
-
-## Performance
-
-`SampleClientBenchmarkTest` sends 1,000,000 heartbeat requests to `SampleServer` over one connection without waiting, and waits for all 1,000,000 responses; it does this 10 times after a warm-up. Each request and response is built and parsed in full, with a string field. Default settings, loopback, JDK 25, 16-core machine, server already warm:
-
-```
-Round 1: 1000000 round trips in 139 ms, 7168 round trips per millisecond
-Round 2: 1000000 round trips in 172 ms, 5800 round trips per millisecond
-Round 3: 1000000 round trips in 130 ms, 7638 round trips per millisecond
-Round 4: 1000000 round trips in 137 ms, 7292 round trips per millisecond
-Round 5: 1000000 round trips in 107 ms, 9339 round trips per millisecond
-```
-
-That's about 5–10 million round trips per second. One way on one connection, with small messages, a separate probe measured about 9–11 million messages per second, and 6–8 million with TLS 1.3.
-
-Per message, the library itself allocates 24 bytes on the sending side (the queue node) and nothing on the writer; the receiving side allocates only what protobuf's parser does (about 40 bytes for a small numeric message, nothing with a [raw handler](#raw-handlers)). Results depend on hardware, message size and network: run the samples to measure your own setup.
 
 ## Versioning
 
