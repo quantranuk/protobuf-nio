@@ -1,7 +1,6 @@
 package io.github.quantranuk.protobuf.nio.sample;
 
 import io.github.quantranuk.protobuf.nio.ProtoServer;
-import io.github.quantranuk.protobuf.nio.ProtoServerListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,7 +17,7 @@ public class SampleServer {
     static final int PORT = 3456;
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        ProtoServerListener listener = ProtoServerListener.builder()
+        ProtoServer server = ProtoServer.builder(PORT)
                 // Runs on the connection's own reader thread: replies go back on the same connection
                 .onMessage(HeartBeat.HeartBeatRequest.class,
                         (connection, request) -> connection.send(MessageFactory.heartBeatResponse(request)))
@@ -29,10 +28,6 @@ public class SampleServer {
                         LOGGER.warn("{} disconnected: {}", connection, reason, cause);
                     }
                 })
-                .build();
-
-        ProtoServer server = ProtoServer.builder(PORT)
-                .listener(listener)
                 .build();
         server.start();
         Runtime.getRuntime().addShutdownHook(new Thread(server::close));

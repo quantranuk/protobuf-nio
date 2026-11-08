@@ -64,7 +64,7 @@ public class TlsTest {
         BlockingQueue<MessageLite> serverReceived = new LinkedBlockingQueue<>();
         BlockingQueue<SSLSession> serverSessions = new LinkedBlockingQueue<>();
         BlockingQueue<DisconnectReason> serverReasons = new LinkedBlockingQueue<>();
-        ProtoServer server = startServer(serverBuilder(tls.serverContext(tls.localhost)).listener(ProtoServerListener.builder()
+        ProtoServer server = startServer(serverBuilder(tls.serverContext(tls.localhost))
                 .onConnected(connection -> serverSessions.add(connection.tlsSession()))
                 .onMessage(HeartBeatRequest.class, (connection, message) -> {
                     serverReceived.add(message);
@@ -72,11 +72,10 @@ public class TlsTest {
                         connection.send(HeartBeatResponse.newBuilder().setRequestTimeMillis(0).build());
                     }
                 })
-                .onDisconnected((connection, reason, cause) -> serverReasons.add(reason))
-                .build()));
+                .onDisconnected((connection, reason, cause) -> serverReasons.add(reason)));
         BlockingQueue<MessageLite> clientReceived = new LinkedBlockingQueue<>();
         ProtoClient client = track(clientBuilder(server, "localhost", tls.clientContext(protocol, null))
-                .listener(ProtoClientListener.builder().onOtherMessage((c, message) -> clientReceived.add(message)).build())
+                .onOtherMessage((c, message) -> clientReceived.add(message))
                 .build());
         client.connect();
 
@@ -103,7 +102,7 @@ public class TlsTest {
         // survive read timeouts
         BlockingQueue<MessageLite> received = new LinkedBlockingQueue<>();
         ProtoServer server = startServer(serverBuilder(tls.serverContext(tls.localhost))
-                .listener(ProtoServerListener.builder().onOtherMessage((connection, message) -> received.add(message)).build()));
+                .onOtherMessage((connection, message) -> received.add(message)));
         ProtoClient client = track(clientBuilder(server, "localhost", tls.clientContext("TLS", null)).build());
         client.connect();
         assertTrue(client.send(request("x".repeat(20_000))));
@@ -117,9 +116,9 @@ public class TlsTest {
     @Test
     public void untrustedServerCertificateFailsTheConnect() throws Exception {
         AtomicInteger serverCalls = new AtomicInteger();
-        ProtoServer server = startServer(serverBuilder(tls.serverContext(tls.untrusted)).listener(counting(serverCalls)));
+        ProtoServer server = startServer(counting(serverBuilder(tls.serverContext(tls.untrusted)), serverCalls));
         ProtoClient client = track(clientBuilder(server, "localhost", tls.clientContext("TLS", null))
-                .listener(ProtoClientListener.builder().onConnected(c -> serverCalls.incrementAndGet()).build())
+                .onConnected(c -> serverCalls.incrementAndGet())
                 .build());
         assertThrows(SSLException.class, client::connect);
         assertEquals(DisconnectReason.TLS_ERROR, client.awaitClosed());
@@ -146,10 +145,10 @@ public class TlsTest {
         AtomicInteger serverCalls = new AtomicInteger();
         ProtoServer server = startServer(serverBuilder(tls.serverContext(tls.localhost))
                 .tlsClientAuth(TlsClientAuth.NEED)
-                .listener(ProtoServerListener.builder().onConnected(connection -> {
+                .onConnected(connection -> {
                     serverCalls.incrementAndGet();
                     sessions.add(connection.tlsSession());
-                }).build()));
+                }));
 
         ProtoClient anonymous = track(clientBuilder(server, "localhost", tls.clientContext("TLS", null)).build());
         assertThrows(IOException.class, anonymous::connect);
@@ -167,7 +166,7 @@ public class TlsTest {
     @Test
     public void tlsClientAndPlainServerDontConnect() throws Exception {
         AtomicInteger serverCalls = new AtomicInteger();
-        ProtoServer plain = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0)).listener(counting(serverCalls)));
+        ProtoServer plain = startServer(counting(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0)), serverCalls));
         ProtoClient tlsClient = track(clientBuilder(plain, "localhost", tls.clientContext("TLS", null)).build());
         assertThrows(IOException.class, tlsClient::connect);
         assertRejectedByThePeer(tlsClient.awaitClosed());
@@ -177,7 +176,7 @@ public class TlsTest {
     @Test
     public void plainClientAndTlsServerDontConnect() throws Exception {
         AtomicInteger serverCalls = new AtomicInteger();
-        ProtoServer server = startServer(serverBuilder(tls.serverContext(tls.localhost)).listener(counting(serverCalls)));
+        ProtoServer server = startServer(counting(serverBuilder(tls.serverContext(tls.localhost)), serverCalls));
         ProtoClient plainClient = track(ProtoClient.builder("localhost", server.localAddress().getPort())
                 .handshakeTimeout(Duration.ofSeconds(2)).build());
         assertThrows(IOException.class, plainClient::connect);
@@ -242,23 +241,12 @@ public class TlsTest {
         return resource;
     }
 
-    private static ProtoServerListener counting(AtomicInteger calls) {
-        return new ProtoServerListener() {
-            @Override
-            public void onConnected(ProtoConnection connection) {
-                calls.incrementAndGet();
-            }
-
-            @Override
-            public void onMessage(ProtoConnection connection, MessageLite message) {
-                calls.incrementAndGet();
-            }
-
-            @Override
-            public void onDisconnected(ProtoConnection connection, DisconnectReason reason, Throwable cause) {
-                calls.incrementAndGet();
-            }
-        };
+    /** Counts every connection, message and disconnect the server reports. */
+    private static ProtoServer.Builder counting(ProtoServer.Builder builder, AtomicInteger calls) {
+        return builder
+                .onConnected(connection -> calls.incrementAndGet())
+                .onOtherMessage((connection, message) -> calls.incrementAndGet())
+                .onDisconnected((connection, reason, cause) -> calls.incrementAndGet());
     }
 
     /**

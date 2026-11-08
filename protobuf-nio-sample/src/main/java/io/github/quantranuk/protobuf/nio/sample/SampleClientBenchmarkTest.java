@@ -1,7 +1,6 @@
 package io.github.quantranuk.protobuf.nio.sample;
 
 import io.github.quantranuk.protobuf.nio.ProtoClient;
-import io.github.quantranuk.protobuf.nio.ProtoClientListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,16 +25,15 @@ public class SampleClientBenchmarkTest {
     private static long responses;
 
     public static void main(String[] args) throws Exception {
-        ProtoClientListener listener = ProtoClientListener.builder()
+        ProtoClient.Builder builder = ProtoClient.builder("localhost", SampleServer.PORT)
                 .onMessage(HeartBeat.HeartBeatResponse.class, (client, response) -> {
                     if (++responses == expectedResponses) {
                         roundDone.countDown();
                     }
                 })
-                .onSendFailure((client, message, cause) -> LOGGER.error("Couldn't send a message: {}", cause.reason()))
-                .build();
+                .onSendFailure((client, message, cause) -> LOGGER.error("Couldn't send a message: {}", cause.reason()));
 
-        try (ProtoClient client = ProtoClient.builder("localhost", SampleServer.PORT).listener(listener).build()) {
+        try (ProtoClient client = builder.build()) {
             client.connect();
             run(client, WARM_UP);
             LOGGER.info("Warmed up with {} round trips", WARM_UP);

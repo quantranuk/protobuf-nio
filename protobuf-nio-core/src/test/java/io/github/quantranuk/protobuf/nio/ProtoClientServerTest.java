@@ -62,11 +62,11 @@ public class ProtoClientServerTest {
 
     @Test
     public void requestResponse() throws Exception {
-        ProtoServer server = startServer(ProtoServerListener.builder()
+        ProtoServer server = startServer(serverBuilder()
                 .onMessage(HeartBeatRequest.class, (connection, request) -> connection.send(HeartBeatResponse.newBuilder()
                         .setRequestTimeMillis(request.getRequestTimeMillis()).setResponseMessage("pong").build())));
         BlockingQueue<HeartBeatResponse> responses = new LinkedBlockingQueue<>();
-        ProtoClient client = client(server, ProtoClientListener.builder()
+        ProtoClient client = client(clientBuilder(server)
                 .onMessage(HeartBeatResponse.class, (c, response) -> responses.add(response)));
         client.connect();
         assertTrue(client.isOpen());
@@ -84,11 +84,11 @@ public class ProtoClientServerTest {
     public void listenerCallbacksAndIdentity() throws Exception {
         BlockingQueue<ProtoConnection> serverConnected = new LinkedBlockingQueue<>();
         BlockingQueue<DisconnectReason> serverDisconnected = new LinkedBlockingQueue<>();
-        ProtoServer server = startServer(ProtoServerListener.builder()
+        ProtoServer server = startServer(serverBuilder()
                 .onConnected(serverConnected::add)
                 .onDisconnected((connection, reason, cause) -> serverDisconnected.add(reason)));
         List<String> clientCalls = new CopyOnWriteArrayList<>();
-        ProtoClient client = client(server, ProtoClientListener.builder()
+        ProtoClient client = client(clientBuilder(server)
                 .onConnected(c -> clientCalls.add("connected " + c.id()))
                 .onDisconnected((c, reason, cause) -> clientCalls.add("disconnected " + reason + " " + cause)));
         assertNull(client.localAddress());
@@ -117,9 +117,9 @@ public class ProtoClientServerTest {
     @Test
     public void idsIncreaseAcrossClientsAndConnections() throws Exception {
         BlockingQueue<ProtoConnection> connected = new LinkedBlockingQueue<>();
-        ProtoServer server = startServer(ProtoServerListener.builder().onConnected(connected::add));
-        ProtoClient first = client(server, ProtoClientListener.builder());
-        ProtoClient second = client(server, ProtoClientListener.builder());
+        ProtoServer server = startServer(serverBuilder().onConnected(connected::add));
+        ProtoClient first = client(clientBuilder(server));
+        ProtoClient second = client(clientBuilder(server));
         assertTrue(second.id() > first.id());
         first.connect();
         assertTrue(connected.poll(5, TimeUnit.SECONDS).id() > second.id());
@@ -128,10 +128,10 @@ public class ProtoClientServerTest {
     @Test
     public void attachments() throws Exception {
         BlockingQueue<String> seen = new LinkedBlockingQueue<>();
-        ProtoServer server = startServer(ProtoServerListener.builder()
+        ProtoServer server = startServer(serverBuilder()
                 .onConnected(connection -> connection.attach("session-" + connection.id()))
                 .onMessage(HeartBeatRequest.class, (connection, request) -> seen.add(connection.attachment())));
-        ProtoClient client = client(server, ProtoClientListener.builder());
+        ProtoClient client = client(clientBuilder(server));
         client.attach(42);
         assertEquals(42, (Integer) client.attachment());
         client.connect();
@@ -143,8 +143,8 @@ public class ProtoClientServerTest {
 
     @Test
     public void clientStateRules() throws Exception {
-        ProtoServer server = startServer(ProtoServerListener.builder());
-        ProtoClient client = client(server, ProtoClientListener.builder());
+        ProtoServer server = startServer(serverBuilder());
+        ProtoClient client = client(clientBuilder(server));
         assertThrows(IllegalStateException.class, () -> client.send(request(1)));
         assertThrows(IllegalStateException.class, client::awaitClosed);
         assertEquals(0, client.pendingMessages());
@@ -152,17 +152,9 @@ public class ProtoClientServerTest {
         assertThrows(IllegalStateException.class, client::connect);
 
         AtomicInteger calls = new AtomicInteger();
-        ProtoClient closedFirst = client(server, new ProtoClientListener() {
-            @Override
-            public void onConnected(ProtoClient c) {
-                calls.incrementAndGet();
-            }
-
-            @Override
-            public void onDisconnected(ProtoClient c, DisconnectReason reason, Throwable cause) {
-                calls.incrementAndGet();
-            }
-        });
+        ProtoClient closedFirst = client(clientBuilder(server)
+                .onConnected(c -> calls.incrementAndGet())
+                .onDisconnected((c, reason, cause) -> calls.incrementAndGet()));
         closedFirst.close();
         assertThrows(IllegalStateException.class, closedFirst::connect);
         assertFalse(closedFirst.isOpen());
@@ -177,7 +169,12 @@ public class ProtoClientServerTest {
         }
         AtomicInteger calls = new AtomicInteger();
         ProtoClient client = track(ProtoClient.builder(new InetSocketAddress(LOOPBACK, port))
-                .listener(countingListener(calls)).build());
+                
+                .onConnected(c -> calls.incrementAndGet())
+                .onOtherMessage((c, message) -> calls.incrementAndGet())
+                .onSendFailure((c, message, cause) -> calls.incrementAndGet())
+                .onDisconnected((c, reason, cause) -> calls.incrementAndGet())
+                .build());
         assertThrows(ConnectException.class, client::connect);
         assertFalse(client.isOpen());
         assertThrows(IllegalStateException.class, client::connect);
@@ -253,8 +250,8 @@ public class ProtoClientServerTest {
 
     @Test
     public void connectAsyncCompletes() throws Exception {
-        ProtoServer server = startServer(ProtoServerListener.builder());
-        ProtoClient client = client(server, ProtoClientListener.builder());
+        ProtoServer server = startServer(serverBuilder());
+        ProtoClient client = client(clientBuilder(server));
         client.connectAsync().get(5, TimeUnit.SECONDS);
         assertTrue(client.isOpen());
     }
@@ -264,7 +261,7 @@ public class ProtoClientServerTest {
     @Test
     public void broadcastReachesEveryMatchingConnection() throws Exception {
         CountDownLatch allConnected = new CountDownLatch(4);
-        ProtoServer server = startServer(ProtoServerListener.builder()
+        ProtoServer server = startServer(serverBuilder()
                 .onConnected(connection -> {
                     connection.attach(connection.id() % 2 == 0 ? "even" : "odd");
                     allConnected.countDown();
@@ -273,7 +270,7 @@ public class ProtoClientServerTest {
         for (int i = 0; i < 4; i++) {
             BlockingQueue<MessageLite> inbox = new LinkedBlockingQueue<>();
             inboxes.add(inbox);
-            client(server, ProtoClientListener.builder().onOtherMessage((c, message) -> inbox.add(message))).connect();
+            client(clientBuilder(server).onOtherMessage((c, message) -> inbox.add(message))).connect();
         }
         assertTrue(allConnected.await(5, TimeUnit.SECONDS));
         assertEquals(4, server.connections().size());
@@ -301,14 +298,12 @@ public class ProtoClientServerTest {
                 .maxPendingMessages(4)
                 .sendTimeout(Duration.ofSeconds(30))   // BLOCK, the default policy, would wait this long in send()
                 .socketOption(StandardSocketOptions.SO_SNDBUF, 4096)
-                .listener(ProtoServerListener.builder()
                         .onSendFailure((connection, message, cause) -> {
                             assertEquals(SendException.Reason.REJECTED, cause.reason());
                             rejectedOn.add(Thread.currentThread());
-                        })
-                        .build()));
+                        }));
         AtomicInteger received = new AtomicInteger();
-        ProtoClient client = client(server, ProtoClientListener.builder().onOtherMessage((c, message) -> {
+        ProtoClient client = client(clientBuilder(server).onOtherMessage((c, message) -> {
             received.incrementAndGet();
             await(gate);   // stops reading
         }));
@@ -342,7 +337,7 @@ public class ProtoClientServerTest {
     public void clientQueueLimitsApply() throws Exception {
         CountDownLatch gate = new CountDownLatch(1);
         AtomicInteger received = new AtomicInteger();
-        ProtoServer server = startServer(ProtoServerListener.builder().onOtherMessage((connection, message) -> {
+        ProtoServer server = startServer(serverBuilder().onOtherMessage((connection, message) -> {
             received.incrementAndGet();
             await(gate);   // stops reading
         }));
@@ -351,7 +346,7 @@ public class ProtoClientServerTest {
                 .overflowPolicy(OverflowPolicy.REJECT)
                 .maxPendingMessages(4)
                 .socketOption(StandardSocketOptions.SO_SNDBUF, 4096)
-                .listener(ProtoClientListener.builder().onSendFailure((c, message, cause) -> failures.add(cause)).build())
+                .onSendFailure((c, message, cause) -> failures.add(cause))
                 .build());
         client.connect();
         try {
@@ -374,10 +369,10 @@ public class ProtoClientServerTest {
 
     @Test
     public void serverCloseClosesEveryConnection() throws Exception {
-        ProtoServer server = startServer(ProtoServerListener.builder());
+        ProtoServer server = startServer(serverBuilder());
         List<ProtoClient> clients = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
-            ProtoClient client = client(server, ProtoClientListener.builder());
+            ProtoClient client = client(clientBuilder(server));
             client.connect();
             clients.add(client);
         }
@@ -406,7 +401,7 @@ public class ProtoClientServerTest {
             accepted[k] = new BitSet(perClient);
         }
         AtomicInteger totalReceived = new AtomicInteger();
-        ProtoServer server = startServer(ProtoServerListener.builder().onMessage(HeartBeatRequest.class, (connection, message) -> {
+        ProtoServer server = startServer(serverBuilder().onMessage(HeartBeatRequest.class, (connection, message) -> {
             long id = message.getRequestTimeMillis();
             BitSet bits = received[(int) (id / perClient)];
             synchronized (bits) {
@@ -418,7 +413,7 @@ public class ProtoClientServerTest {
         List<Thread> senders = new ArrayList<>();
         for (int k = 0; k < clients; k++) {
             int client = k;
-            ProtoClient c = client(server, ProtoClientListener.builder().onSendFailure((cl, message, cause) -> {
+            ProtoClient c = client(clientBuilder(server).onSendFailure((cl, message, cause) -> {
                 if (cause.reason() != SendException.Reason.REJECTED) {
                     synchronized (failed[client]) {
                         failed[client].set((int) (((HeartBeatRequest) message).getRequestTimeMillis() % perClient));
@@ -469,13 +464,11 @@ public class ProtoClientServerTest {
                     }
                     task.run();
                 } : task))
-                .listener(ProtoServerListener.builder()
                         .onConnected(connection -> events.add("connected"))
                         .onMessage(HeartBeatRequest.class, (connection, message) -> received.incrementAndGet())
-                        .onDisconnected((connection, reason, cause) -> events.add("disconnected " + reason))
-                        .build()));
+                        .onDisconnected((connection, reason, cause) -> events.add("disconnected " + reason)));
         delayNextReader.set(true);   // a connection's reader is the first thread the server creates for it
-        ProtoClient client = client(server, ProtoClientListener.builder());
+        ProtoClient client = client(clientBuilder(server));
         client.connect();
         int sent = 10_000;
         for (int i = 0; i < sent; i++) {
@@ -495,17 +488,8 @@ public class ProtoClientServerTest {
         AtomicInteger serverCalls = new AtomicInteger();
         ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
                 .closeTimeout(Duration.ofMillis(300))
-                .listener(new ProtoServerListener() {
-                    @Override
-                    public void onConnected(ProtoConnection connection) {
-                        serverCalls.incrementAndGet();
-                    }
-
-                    @Override
-                    public void onDisconnected(ProtoConnection connection, DisconnectReason reason, Throwable cause) {
-                        serverCalls.incrementAndGet();
-                    }
-                }));
+                .onConnected(connection -> serverCalls.incrementAndGet())
+                .onDisconnected((connection, reason, cause) -> serverCalls.incrementAndGet()));
         Socket silent = track(new Socket(LOOPBACK, server.localAddress().getPort()));   // never sends a preamble
         silent.setSoTimeout(5000);
         silent.getInputStream().readNBytes(Protocol.PREAMBLE_LENGTH);   // the server has accepted it
@@ -522,11 +506,11 @@ public class ProtoClientServerTest {
     @Test
     public void serverCloseFromAListenerDoesNotDeadlock() throws Exception {
         ProtoServer[] holder = new ProtoServer[1];
-        ProtoServer server = startServer(ProtoServerListener.builder()
+        ProtoServer server = startServer(serverBuilder()
                 .onMessage(HeartBeatRequest.class, (connection, request) -> holder[0].close()));
         holder[0] = server;
-        ProtoClient trigger = client(server, ProtoClientListener.builder());
-        ProtoClient bystander = client(server, ProtoClientListener.builder());
+        ProtoClient trigger = client(clientBuilder(server));
+        ProtoClient bystander = client(clientBuilder(server));
         trigger.connect();
         bystander.connect();
         trigger.send(request(1));
@@ -552,9 +536,9 @@ public class ProtoClientServerTest {
     @Test
     public void maxConnectionsRejectsTheExtraConnection() throws Exception {
         ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0)).maxConnections(2));
-        client(server, ProtoClientListener.builder()).connect();
-        client(server, ProtoClientListener.builder()).connect();
-        ProtoClient third = client(server, ProtoClientListener.builder());
+        client(clientBuilder(server)).connect();
+        client(clientBuilder(server)).connect();
+        ProtoClient third = client(clientBuilder(server));
         assertThrows(IOException.class, third::connect);
     }
 
@@ -562,29 +546,20 @@ public class ProtoClientServerTest {
     public void atMaxConnectionsSilentPeersMakeRoomForNewConnections() throws Exception {
         AtomicInteger serverCalls = new AtomicInteger();
         ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0)).maxConnections(2)
-                .listener(new ProtoServerListener() {
-                    @Override
-                    public void onConnected(ProtoConnection connection) {
-                        serverCalls.incrementAndGet();
-                    }
-
-                    @Override
-                    public void onDisconnected(ProtoConnection connection, DisconnectReason reason, Throwable cause) {
-                        serverCalls.incrementAndGet();
-                    }
-                }));
+                .onConnected(connection -> serverCalls.incrementAndGet())
+                .onDisconnected((connection, reason, cause) -> serverCalls.incrementAndGet()));
         // Two peers connect and never send a preamble: they hold both slots
         Socket silent1 = track(new Socket(LOOPBACK, server.localAddress().getPort()));
         Socket silent2 = track(new Socket(LOOPBACK, server.localAddress().getPort()));
 
-        client(server, ProtoClientListener.builder()).connect();   // replaces silent1, the oldest still in its handshake
+        client(clientBuilder(server)).connect();   // replaces silent1, the oldest still in its handshake
         assertClosedByServer(silent1);
         assertOpen(silent2);
-        client(server, ProtoClientListener.builder()).connect();   // replaces silent2
+        client(clientBuilder(server)).connect();   // replaces silent2
         assertClosedByServer(silent2);
 
         // Both slots are now open connections, which are never replaced
-        assertThrows(IOException.class, client(server, ProtoClientListener.builder())::connect);
+        assertThrows(IOException.class, client(clientBuilder(server))::connect);
         assertEquals(2, server.connections().size());
         assertEquals(2, serverCalls.get(), "only the two clients' onConnected; the silent peers were never reported");
     }
@@ -611,13 +586,13 @@ public class ProtoClientServerTest {
     @Test
     public void connectedListenerExceptionDoesNotStopAccepting() throws Exception {
         BlockingQueue<MessageLite> received = new LinkedBlockingQueue<>();
-        ProtoServer server = startServer(ProtoServerListener.builder()
+        ProtoServer server = startServer(serverBuilder()
                 .onConnected(connection -> {
                     throw new RuntimeException("boom (expected by the test)");
                 })
                 .onOtherMessage((connection, message) -> received.add(message)));
         for (int i = 0; i < 3; i++) {
-            ProtoClient client = client(server, ProtoClientListener.builder());
+            ProtoClient client = client(clientBuilder(server));
             client.connect();
             client.send(request(i));
             assertEquals(request(i), received.poll(5, TimeUnit.SECONDS));
@@ -629,7 +604,7 @@ public class ProtoClientServerTest {
         // D8: a handler blocked on one connection doesn't stall the others
         CountDownLatch release = new CountDownLatch(1);
         BlockingQueue<Long> handled = new LinkedBlockingQueue<>();
-        ProtoServer server = startServer(ProtoServerListener.builder()
+        ProtoServer server = startServer(serverBuilder()
                 .onMessage(HeartBeatRequest.class, (connection, request) -> {
                     if (request.getRequestTimeMillis() == 1) {
                         try {
@@ -640,8 +615,8 @@ public class ProtoClientServerTest {
                     }
                     handled.add(request.getRequestTimeMillis());
                 }));
-        ProtoClient blocked = client(server, ProtoClientListener.builder());
-        ProtoClient other = client(server, ProtoClientListener.builder());
+        ProtoClient blocked = client(clientBuilder(server));
+        ProtoClient other = client(clientBuilder(server));
         blocked.connect();
         other.connect();
         blocked.send(request(1));
@@ -655,23 +630,11 @@ public class ProtoClientServerTest {
     // ------------------------------------------------------------------ listener builders and builders
 
     @Test
-    public void listenerBuilderDispatchesByExactType() throws Exception {
-        BlockingQueue<String> events = new LinkedBlockingQueue<>();
-        ProtoClientListener listener = ProtoClientListener.builder()
-                .onMessage(HeartBeatRequest.class, (client, message) -> events.add("request"))
-                .onOtherMessage((client, message) -> events.add("other " + message.getClass().getSimpleName()))
-                .build();
-        listener.onMessage(null, request(1));
-        listener.onMessage(null, HeartBeatResponse.getDefaultInstance());
-        assertEquals("request", events.poll());
-        assertEquals("other HeartBeatResponse", events.poll());
-
-        ProtoServerListener dropping = ProtoServerListener.builder().build();
-        dropping.onMessage(null, request(1));   // logged once and dropped
-        dropping.onMessage(null, request(2));
-
-        ProtoClientListener.Builder builder = ProtoClientListener.builder().onMessage(HeartBeatRequest.class, (c, m) -> { });
-        assertThrows(IllegalArgumentException.class, () -> builder.onMessage(HeartBeatRequest.class, (c, m) -> { }));
+    public void aMessageTypeCanHaveOnlyOneHandler() {
+        ProtoClient.Builder client = ProtoClient.builder("localhost", 1).onMessage(HeartBeatRequest.class, (c, m) -> { });
+        assertThrows(IllegalArgumentException.class, () -> client.onMessage(HeartBeatRequest.class, (c, m) -> { }));
+        ProtoServer.Builder server = ProtoServer.builder(0).onMessage(HeartBeatRequest.class, (c, m) -> { });
+        assertThrows(IllegalArgumentException.class, () -> server.onMessage(HeartBeatRequest.class, (c, m) -> { }));
     }
 
     @Test
@@ -685,7 +648,7 @@ public class ProtoClientServerTest {
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(-1));
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).backlog(0));
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).maxConnections(0));
-        assertThrows(NullPointerException.class, () -> ProtoServer.builder(0).listener(null));
+        assertThrows(NullPointerException.class, () -> ProtoServer.builder(0).onDisconnected(null));
         assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).maxPendingBytes(0));
         assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).maxPendingMessages(0));
         assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).sendTimeout(Duration.ofMillis(-1)));
@@ -702,11 +665,9 @@ public class ProtoClientServerTest {
         BlockingQueue<MessageLite> received = new LinkedBlockingQueue<>();
         ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
                 .allowedMessageTypes(HeartBeatRequest.class)
-                .listener(ProtoServerListener.builder()
                         .onOtherMessage((connection, message) -> received.add(message))
-                        .onDisconnected((connection, reason, cause) -> serverReasons.add(reason))
-                        .build()));
-        ProtoClient client = client(server, ProtoClientListener.builder());
+                        .onDisconnected((connection, reason, cause) -> serverReasons.add(reason)));
+        ProtoClient client = client(clientBuilder(server));
         client.connect();
         client.send(request(1));
         assertEquals(request(1), received.poll(5, TimeUnit.SECONDS));
@@ -721,20 +682,18 @@ public class ProtoClientServerTest {
     public void rawHandlersReplaceOnMessageForTheirType() throws Exception {
         BlockingQueue<Object> received = new LinkedBlockingQueue<>();
         ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
-                .rawHandler(HeartBeatRequest.class, (connection, payload) -> {
+                .onRawMessage(HeartBeatRequest.class, (connection, payload) -> {
                     try {
                         received.add(HeartBeatRequest.parseFrom(payload));
                     } catch (IOException e) {
                         received.add(e);
                     }
                 })
-                .listener(ProtoServerListener.builder()
                         .onMessage(HeartBeatRequest.class, (connection, message) -> received.add("onMessage called"))
-                        .onOtherMessage((connection, message) -> received.add(message))
-                        .build()));
+                        .onOtherMessage((connection, message) -> received.add(message)));
         BlockingQueue<Object> clientReceived = new LinkedBlockingQueue<>();
         ProtoClient client = track(ProtoClient.builder("localhost", server.localAddress().getPort())
-                .rawHandler(HeartBeatResponse.class, (c, payload) -> clientReceived.add(payload.remaining()))
+                .onRawMessage(HeartBeatResponse.class, (c, payload) -> clientReceived.add(payload.remaining()))
                 .build());
         client.connect();
         HeartBeatResponse response = HeartBeatResponse.newBuilder().setRequestTimeMillis(5).build();
@@ -745,13 +704,13 @@ public class ProtoClientServerTest {
         server.broadcast(response);
         assertEquals(response.getSerializedSize(), clientReceived.poll(5, TimeUnit.SECONDS));
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0)
-                .rawHandler(HeartBeatRequest.class, (c, p) -> { })
-                .rawHandler(HeartBeatRequest.class, (c, p) -> { }));
+                .onRawMessage(HeartBeatRequest.class, (c, p) -> { })
+                .onRawMessage(HeartBeatRequest.class, (c, p) -> { }));
     }
 
     @Test
     public void clientBuilderIsReusable() throws Exception {
-        ProtoServer server = startServer(ProtoServerListener.builder());
+        ProtoServer server = startServer(serverBuilder());
         ProtoClient.Builder builder = ProtoClient.builder(server.localAddress());
         ProtoClient first = track(builder.build());
         ProtoClient second = track(builder.build());
@@ -788,8 +747,8 @@ public class ProtoClientServerTest {
         return resource;
     }
 
-    private ProtoServer startServer(ProtoServerListener.Builder listener) throws IOException {
-        return startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0)).listener(listener.build()));
+    private static ProtoServer.Builder serverBuilder() {
+        return ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0));
     }
 
     private ProtoServer startServer(ProtoServer.Builder builder) throws IOException {
@@ -798,35 +757,11 @@ public class ProtoClientServerTest {
         return server;
     }
 
-    private ProtoClient client(ProtoServer server, ProtoClientListener.Builder listener) {
-        return client(server, listener.build());
+    private static ProtoClient.Builder clientBuilder(ProtoServer server) {
+        return ProtoClient.builder("localhost", server.localAddress().getPort());
     }
 
-    private ProtoClient client(ProtoServer server, ProtoClientListener listener) {
-        return track(ProtoClient.builder("localhost", server.localAddress().getPort()).listener(listener).build());
-    }
-
-    private static ProtoClientListener countingListener(AtomicInteger calls) {
-        return new ProtoClientListener() {
-            @Override
-            public void onConnected(ProtoClient client) {
-                calls.incrementAndGet();
-            }
-
-            @Override
-            public void onMessage(ProtoClient client, MessageLite message) {
-                calls.incrementAndGet();
-            }
-
-            @Override
-            public void onSendFailure(ProtoClient client, MessageLite message, SendException cause) {
-                calls.incrementAndGet();
-            }
-
-            @Override
-            public void onDisconnected(ProtoClient client, DisconnectReason reason, Throwable cause) {
-                calls.incrementAndGet();
-            }
-        };
+    private ProtoClient client(ProtoClient.Builder builder) {
+        return track(builder.build());
     }
 }

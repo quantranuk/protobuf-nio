@@ -10,7 +10,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Per-type handler lookup for the listener builders: exact class match through a {@link ClassValue}, so dispatching a
+ * Per-type handler lookup for the callbacks set on the builders ({@link Callbacks}): exact class match through a {@link ClassValue}, so dispatching a
  * message neither hashes nor allocates. Types without a handler go to the fallback, or are logged at WARN once per type
  * and dropped when there's no fallback.
  *

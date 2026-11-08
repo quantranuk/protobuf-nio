@@ -37,4 +37,4 @@ Out of scope:
   (for example a peer sending messages up to the default 64 MiB `maxMessageSize`);
 - vulnerabilities in protobuf-java, the JDK or other dependencies themselves: report those to their projects (but do
   tell us if protobuf-nio uses them in an unsafe way, or should require a fixed version);
-- problems in your own listeners or message handling.
+- problems in your own callbacks or message handling.

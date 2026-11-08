@@ -2,7 +2,6 @@ package io.github.quantranuk.protobuf.nio.internal;
 
 import io.github.quantranuk.protobuf.nio.DisconnectReason;
 import io.github.quantranuk.protobuf.nio.ProtoClient;
-import io.github.quantranuk.protobuf.nio.ProtoClientListener;
 import io.github.quantranuk.protobuf.nio.SendException;
 import com.google.protobuf.MessageLite;
 
@@ -33,16 +32,16 @@ public final class DefaultProtoClient implements ProtoClient {
     private final InetSocketAddress target;
     private final int connectTimeoutMillis;
     private final ConnectionConfig config;
-    private final ProtoClientListener listener;
+    private final Callbacks<ProtoClient> callbacks;
     private final AtomicInteger state = new AtomicInteger(NEW);
     private volatile Connection connection;
     private volatile Object attachment;
 
-    public DefaultProtoClient(InetSocketAddress target, Duration connectTimeout, ConnectionConfig config, ProtoClientListener listener) {
+    public DefaultProtoClient(InetSocketAddress target, Duration connectTimeout, ConnectionConfig config, Callbacks<ProtoClient> callbacks) {
         this.target = target;
         this.connectTimeoutMillis = connectTimeout.isZero() ? 0 : (int) Math.clamp(connectTimeout.toMillis(), 1, Integer.MAX_VALUE);
         this.config = config;
-        this.listener = listener;
+        this.callbacks = callbacks;
     }
 
     @Override
@@ -211,27 +210,27 @@ public final class DefaultProtoClient implements ProtoClient {
     private final class Events implements ConnectionListener {
         @Override
         public void onConnected() {
-            listener.onConnected(DefaultProtoClient.this);
+            callbacks.connected(DefaultProtoClient.this);
         }
 
         @Override
         public void onMessage(MessageLite message) {
-            listener.onMessage(DefaultProtoClient.this, message);
+            callbacks.message(DefaultProtoClient.this, message);
         }
 
         @Override
         public void onRawMessage(Object handler, ByteBuffer payload) {
-            ((ProtoClientListener.RawMessageHandler) handler).onMessage(DefaultProtoClient.this, payload);
+            ((ProtoClient.RawMessageHandler) handler).onMessage(DefaultProtoClient.this, payload);
         }
 
         @Override
         public void onSendFailure(MessageLite message, SendException cause) {
-            listener.onSendFailure(DefaultProtoClient.this, message, cause);
+            callbacks.sendFailure(DefaultProtoClient.this, message, cause);
         }
 
         @Override
         public void onDisconnected(DisconnectReason reason, Throwable cause) {
-            listener.onDisconnected(DefaultProtoClient.this, reason, cause);
+            callbacks.disconnected(DefaultProtoClient.this, reason, cause);
         }
     }
 }

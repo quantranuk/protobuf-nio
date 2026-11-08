@@ -1,5 +1,6 @@
 package io.github.quantranuk.protobuf.nio;
 
+import io.github.quantranuk.protobuf.nio.internal.Callbacks;
 import io.github.quantranuk.protobuf.nio.internal.ConnectionConfig;
 import io.github.quantranuk.protobuf.nio.internal.DefaultProtoServer;
 import com.google.protobuf.MessageLite;
@@ -8,24 +9,42 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketOption;
 import java.net.StandardSocketOptions;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Objects;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import javax.net.ssl.SSLContext;
 
 /**
- * Accepts protobuf-nio connections. Each accepted connection gets its own reader and writer virtual threads, so
- * listener callbacks for different connections run concurrently (see {@link ProtoServerListener}); one more virtual
- * thread accepts connections.
+ * Accepts protobuf-nio connections, each a {@link ProtoConnection}. The builder sets what happens on each connection's
+ * events:
  * <pre>{@code
- * ProtoServer server = ProtoServer.builder(3456).listener(listener).build();
+ * ProtoServer server = ProtoServer.builder(3456)
+ *         .onMessage(Ping.class, (connection, ping) -> connection.send(Pong.newBuilder().setText("pong").build()))
+ *         .build();
  * server.start();
  * // ...
  * server.close();
  * }</pre>
  * All methods are thread-safe.
+ *
+ * <h2>Callbacks and threads</h2>
+ * Each accepted connection has a reader and a writer virtual thread; one more virtual thread accepts connections.
+ * <ul>
+ *     <li>A connection's reader thread runs its {@code onConnected}, {@code onMessage} (and raw handlers) and
+ *     {@code onDisconnected} callbacks, in that order and never overlapping.</li>
+ *     <li>Its writer thread runs {@code onSendFailure}, except for {@link SendException.Reason#REJECTED} and
+ *     {@link SendException.Reason#DROPPED}, which run on the thread that called {@code send()} or
+ *     {@code broadcast()}, before it returns.</li>
+ *     <li>{@code onDisconnected} is a connection's last callback, exactly once, after every {@code onSendFailure}.</li>
+ *     <li>A connection whose handshake fails is never reported.</li>
+ * </ul>
+ * <b>Callbacks for different connections run concurrently</b>, each on its connection's own virtual thread, so they
+ * must be thread-safe. A callback may block; that stalls only its own connection. An exception thrown by a callback is
+ * logged and ignored, and the connection carries on.
  */
 public interface ProtoServer extends AutoCloseable {
 
@@ -113,7 +132,7 @@ public interface ProtoServer extends AutoCloseable {
      * itself connected as soon as it has the server's preamble and may already be sending, so the handshake gets until
      * {@code closeTimeout} to finish, and the connection then opens and closes gracefully like the others (it's
      * reported, {@code onConnected} included); one that doesn't finish by then is closed without being reported. Called
-     * from a connection's own listener, it doesn't wait for that connection. Idempotent.
+     * from a connection's own callback, it doesn't wait for that connection. Idempotent.
      */
     @Override
     void close();
@@ -134,7 +153,7 @@ public interface ProtoServer extends AutoCloseable {
     final class Builder {
         private final InetSocketAddress bindAddress;
         private final ConnectionConfig.Builder config = ConnectionConfig.builder().socketOption(StandardSocketOptions.SO_REUSEADDR, true);
-        private ProtoServerListener listener = new ProtoServerListener() { };
+        private final Callbacks.Builder<ProtoConnection> callbacks = Callbacks.builder();
         private int backlog = 1024;
         private int maxConnections = Integer.MAX_VALUE;
 
@@ -143,29 +162,90 @@ public interface ProtoServer extends AutoCloseable {
         }
 
         /**
-         * Sets the listener that receives the events of every connection. Default: a no-op listener.
+         * Called when a connection is open: its TLS handshake (when configured) and protocol preamble have succeeded.
+         * Runs on the connection's reader thread, before any {@code onMessage}. Just before it runs, the connection joins
+         * {@link ProtoServer#connections()}, so it may already receive broadcasts. Default: nothing.
          *
-         * @param listener receives the events of the connections
+         * @param handler called with each new connection
          * @return this builder
          */
-        public Builder listener(ProtoServerListener listener) {
-            this.listener = Objects.requireNonNull(listener, "listener");
+        public Builder onConnected(Consumer<ProtoConnection> handler) {
+            callbacks.onConnected(handler);
+            return this;
+        }
+
+        /**
+         * Handles received messages whose class is exactly {@code type} (subclasses and other types don't match). Runs
+         * on the connection's reader thread, in the order the client sent the messages; the connection's next message
+         * isn't read until the handler returns. Reply with {@link ProtoConnection#send}.
+         *
+         * @param type    the generated message class
+         * @param handler called for each message of that type
+         * @param <T>     the message type
+         * @return this builder
+         * @throws IllegalArgumentException if a handler for this type is already registered
+         */
+        @SuppressWarnings("unchecked")
+        public <T extends MessageLite> Builder onMessage(Class<T> type, MessageHandler<? super T> handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onMessage(type, (connection, message) -> handler.onMessage(connection, (T) message));
+            return this;
+        }
+
+        /**
+         * Handles received messages of types without their own {@link #onMessage} handler. Without it, they're logged
+         * at WARN once per type and dropped.
+         *
+         * @param handler called on the connection's reader thread for each such message
+         * @return this builder
+         */
+        public Builder onOtherMessage(MessageHandler<MessageLite> handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onOtherMessage(handler::onMessage);
             return this;
         }
 
         /**
          * Optional low-garbage path: messages of this type skip parsing and go to {@code handler} with their raw
-         * bytes, instead of the listener's {@code onMessage}. The type is always accepted, even when
-         * {@link #allowedMessageTypes} doesn't list it.
+         * bytes, instead of {@code onMessage}. The type is always accepted, even when {@link #allowedMessageTypes}
+         * doesn't list it.
          *
-         * @param type the generated message class
-         * @param handler receives the payload of each message of that type
+         * @param type    the generated message class
+         * @param handler receives the payload of each message of that type, on the connection's reader thread
          * @return this builder
          * @throws IllegalArgumentException if the type already has a raw handler, or isn't a generated protobuf message
          *                                  class
          */
-        public Builder rawHandler(Class<? extends MessageLite> type, ProtoServerListener.RawMessageHandler handler) {
+        public Builder onRawMessage(Class<? extends MessageLite> type, RawMessageHandler handler) {
             config.rawHandler(type, handler);
+            return this;
+        }
+
+        /**
+         * Called for a message passed to {@link ProtoConnection#send} or {@link ProtoServer#broadcast} that wasn't
+         * written. Runs on the connection's writer thread, except for {@link SendException.Reason#REJECTED} and
+         * {@link SendException.Reason#DROPPED}, which run on the thread that called {@code send()} or
+         * {@code broadcast()}. Default: nothing.
+         *
+         * @param handler called for each message that wasn't written
+         * @return this builder
+         */
+        public Builder onSendFailure(SendFailureHandler handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onSendFailure(handler::onSendFailure);
+            return this;
+        }
+
+        /**
+         * Called when a connection closes: its last callback, exactly once, on its reader thread, after every
+         * {@code onSendFailure}. Default: nothing.
+         *
+         * @param handler called once for each connection that closes
+         * @return this builder
+         */
+        public Builder onDisconnected(DisconnectHandler handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onDisconnected(handler::onDisconnected);
             return this;
         }
 
@@ -185,9 +265,9 @@ public interface ProtoServer extends AutoCloseable {
 
         /**
          * Caps the number of connections, including those still in their handshake. At the limit, a new connection
-         * replaces the oldest connection still in its handshake, which is closed without being reported to the listener,
-         * so peers that connect and stay silent can't hold every slot; if every connection has finished its handshake,
-         * the new connection is closed at once. Default: unlimited.
+         * replaces the oldest connection still in its handshake, which is closed without any callback, so peers that
+         * connect and stay silent can't hold every slot; if every connection has finished its handshake, the new
+         * connection is closed at once. Default: unlimited.
          *
          * @param max the limit; must be positive
          * @return this builder
@@ -391,7 +471,7 @@ public interface ProtoServer extends AutoCloseable {
         /**
          * Accepts TLS connections only, with the certificate of this context's key managers (and its trust managers
          * for client certificates, see {@link #tlsClientAuth}). Each connection's TLS handshake runs on its own thread
-         * within {@code handshakeTimeout}; a connection whose handshake fails is never reported to the listener.
+         * within {@code handshakeTimeout}; a connection whose handshake fails is never reported to the callbacks.
          * Default: no TLS.
          *
          * @param context provides the protocols, cipher suites, certificate and trust material
@@ -419,7 +499,67 @@ public interface ProtoServer extends AutoCloseable {
          * @return a new, unstarted server
          */
         public ProtoServer build() {
-            return new DefaultProtoServer(bindAddress, backlog, maxConnections, config.build(), listener);
+            return new DefaultProtoServer(bindAddress, backlog, maxConnections, config.build(), callbacks.build());
         }
+    }
+
+    /**
+     * Handles received messages of one type; see {@link Builder#onMessage}.
+     *
+     * @param <T> the message type
+     */
+    @FunctionalInterface
+    interface MessageHandler<T extends MessageLite> {
+        /**
+         * Called on the connection's reader thread.
+         *
+         * @param connection the connection that received the message
+         * @param message    the parsed message
+         */
+        void onMessage(ProtoConnection connection, T message);
+    }
+
+    /** Handles a message of a type registered with {@link Builder#onRawMessage}, without parsing it. */
+    @FunctionalInterface
+    interface RawMessageHandler {
+        /**
+         * Called on the connection's reader thread, like {@code onMessage}. Raw handlers for different connections run
+         * concurrently.
+         *
+         * @param connection the connection that received the message
+         * @param payload    the unparsed protobuf bytes, from its position to its limit. To avoid allocating per
+         *                   message, it's a view over the read buffer that's reused: it's valid only during the call,
+         *                   and its bytes mustn't be modified. It's a heap buffer, so {@code payload.array()},
+         *                   {@code arrayOffset() + position()} and {@code remaining()} give the bytes without copying,
+         *                   for example to parse into a builder reused by this connection. Copy what you need to keep.
+         */
+        void onMessage(ProtoConnection connection, ByteBuffer payload);
+    }
+
+    /** Called for a message that wasn't written; see {@link Builder#onSendFailure}. */
+    @FunctionalInterface
+    interface SendFailureHandler {
+        /**
+         * See {@link Builder#onSendFailure}.
+         *
+         * @param connection the connection the message was sent on
+         * @param message    the message that wasn't written
+         * @param cause      why; {@link SendException#reason()} tells the cases apart
+         */
+        void onSendFailure(ProtoConnection connection, MessageLite message, SendException cause);
+    }
+
+    /** Called when a connection closes; see {@link Builder#onDisconnected}. */
+    @FunctionalInterface
+    interface DisconnectHandler {
+        /**
+         * See {@link Builder#onDisconnected}.
+         *
+         * @param connection the connection that closed
+         * @param reason     why it closed
+         * @param cause      the exception behind the reason, or {@code null} for {@link DisconnectReason#CLOSED_LOCALLY}
+         *                   and {@link DisconnectReason#CLOSED_BY_PEER}
+         */
+        void onDisconnected(ProtoConnection connection, DisconnectReason reason, Throwable cause);
     }
 }

@@ -52,10 +52,8 @@ public class ModulePathTest {
                     public static void main(String[] args) throws Exception {
                         BlockingQueue<Object> results = new LinkedBlockingQueue<>();
                         ProtoServer server = ProtoServer.builder(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
-                                .listener(ProtoServerListener.builder()
-                                        .onMessage(HeartBeatRequest.class, (c, m) -> results.add("received " + m.getRequestTimeMillis()))
-                                        .onDisconnected((c, reason, cause) -> results.add(reason + ": " + cause))
-                                        .build())
+                                .onMessage(HeartBeatRequest.class, (c, m) -> results.add("received " + m.getRequestTimeMillis()))
+                                .onDisconnected((c, reason, cause) -> results.add(reason + ": " + cause))
                                 .build();
                         server.start();
                         try (ProtoClient client = ProtoClient.builder("localhost", server.localAddress().getPort()).build()) {

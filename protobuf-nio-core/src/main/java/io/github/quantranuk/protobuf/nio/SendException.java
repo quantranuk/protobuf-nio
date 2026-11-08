@@ -32,7 +32,7 @@ public final class SendException extends RuntimeException {
 
     /**
      * Creates the exception. The library creates these itself; the constructor is public for tests of your own
-     * listeners.
+     * callbacks.
      *
      * @param reason why the message wasn't written
      * @param cause  the I/O error for {@link Reason#WRITE_FAILED}, otherwise usually {@code null}

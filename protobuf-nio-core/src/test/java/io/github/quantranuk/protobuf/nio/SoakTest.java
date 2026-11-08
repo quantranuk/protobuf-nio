@@ -45,8 +45,12 @@ public class SoakTest {
     public void everyAcceptedMessageIsReceivedOrReported() throws Exception {
         long seed = Long.getLong("soak.seed", System.nanoTime());
         Random random = new Random(seed);
+        ServerEvents serverHandlers = new ServerEvents();
         ProtoServer server = ProtoServer.builder(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
-                .listener(new ServerEvents())
+                .onConnected(serverHandlers::onConnected)
+                .onOtherMessage(serverHandlers::onMessage)
+                .onSendFailure(serverHandlers::onSendFailure)
+                .onDisconnected(serverHandlers::onDisconnected)
                 .build();
         server.start();
         List<Session> sessions = new ArrayList<>();
@@ -123,13 +127,11 @@ public class SoakTest {
     }
 
     /** Records what the server receives, echoes some of it, and checks its callbacks' order per connection. */
-    private final class ServerEvents implements ProtoServerListener {
-        @Override
+    private final class ServerEvents {
         public void onConnected(ProtoConnection connection) {
             serverEvents.put(connection, new Events());
         }
 
-        @Override
         public void onMessage(ProtoConnection connection, MessageLite message) {
             long id = ((HeartBeatRequest) message).getRequestTimeMillis();
             BitSet bits = received.computeIfAbsent(id / MAX_PER_SESSION, key -> new BitSet());
@@ -141,12 +143,10 @@ public class SoakTest {
             }
         }
 
-        @Override
         public void onSendFailure(ProtoConnection connection, MessageLite message, SendException cause) {
             serverEvents.get(connection).failure();
         }
 
-        @Override
         public void onDisconnected(ProtoConnection connection, DisconnectReason reason, Throwable cause) {
             serverEvents.get(connection).disconnected();
         }
@@ -182,22 +182,15 @@ public class SoakTest {
             this.key = key;
             this.random = random;
             this.client = ProtoClient.builder("localhost", port)
-                    .listener(new ProtoClientListener() {
-                        @Override
-                        public void onSendFailure(ProtoClient c, MessageLite message, SendException cause) {
-                            events.failure();
-                            if (cause.reason() != SendException.Reason.REJECTED) {
-                                synchronized (failed) {
-                                    failed.set((int) (((HeartBeatRequest) message).getRequestTimeMillis() % MAX_PER_SESSION));
-                                }
+                    .onSendFailure((c, message, cause) -> {
+                        events.failure();
+                        if (cause.reason() != SendException.Reason.REJECTED) {
+                            synchronized (failed) {
+                                failed.set((int) (((HeartBeatRequest) message).getRequestTimeMillis() % MAX_PER_SESSION));
                             }
                         }
-
-                        @Override
-                        public void onDisconnected(ProtoClient c, DisconnectReason reason, Throwable cause) {
-                            events.disconnected();
-                        }
                     })
+                    .onDisconnected((c, reason, cause) -> events.disconnected())
                     .build();
         }
 

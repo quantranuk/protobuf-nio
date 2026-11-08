@@ -6,7 +6,7 @@ import javax.net.ssl.SSLSession;
 import java.net.InetSocketAddress;
 
 /**
- * One client connection accepted by a {@link ProtoServer}. It's passed to every {@link ProtoServerListener} callback
+ * One client connection accepted by a {@link ProtoServer}. It's passed to every callback set on the server's builder
  * and listed by {@link ProtoServer#connections()}. All methods are thread-safe.
  * <p>
  * {@code equals}/{@code hashCode} are identity; {@code toString()} is {@code "ProtoConnection#<id>[<remote address>]"}.
@@ -58,7 +58,7 @@ public interface ProtoConnection extends AutoCloseable {
      * Until closing starts, every message passed to send is either written or reported to {@code onSendFailure}: when
      * this returns false because the queue is full, {@code onSendFailure(REJECTED)} has already run on the calling
      * thread, and {@code DROP_OLDEST} reports what it drops as {@code DROPPED}, also on the calling thread.
-     * Once closing has started, send returns false without calling the listener ({@code onDisconnected} stays last).
+     * Once closing has started, send returns false without any callback ({@code onDisconnected} stays last).
      *
      * @param message the message to send
      * @return true if queued; false if not (queue full, or closing or closed). If interrupted while waiting for room,

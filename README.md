@@ -9,19 +9,13 @@ Send [Protocol Buffers](https://protobuf.dev/) messages between Java application
 `Ping` and `Pong` are ordinary classes generated from your `.proto` file:
 
 ```java
-// Server: answers every Ping with a Pong
 ProtoServer server = ProtoServer.builder(3456)
-        .listener(ProtoServerListener.builder()
-                .onMessage(Ping.class, (connection, ping) -> connection.send(Pong.newBuilder().setText("pong").build()))
-                .build())
+        .onMessage(Ping.class, (connection, ping) -> connection.send(Pong.newBuilder().setText("pong").build()))
         .build();
 server.start();
 
-// Client: sends a Ping and prints the Pong
 ProtoClient client = ProtoClient.builder("localhost", 3456)
-        .listener(ProtoClientListener.builder()
-                .onMessage(Pong.class, (c, pong) -> System.out.println(pong.getText()))
-                .build())
+        .onMessage(Pong.class, (c, pong) -> System.out.println(pong.getText()))
         .build();
 client.connect();
 client.send(Ping.newBuilder().setText("ping").build());
@@ -43,7 +37,7 @@ How it compares for that job (protobuf-nio's advantages in bold):
 |---|---|---|---|---|
 | Message types per connection | **Any number, each dispatched to its own handler by type** | One request and one response type per stream method; more need a `oneof` wrapper | One per decoder; more need a wrapper message or your own type registry | One, unless you add a wrapper message |
 | Who can send, and when | **Either side, at any time, once connected** | The server sends on streams the client has opened | Either side; you write the protocol | Either side; you write the protocol |
-| What you write besides messages | **Nothing: a builder and a listener** | A service definition, generated stubs (protoc plugin) and stream observers | Pipeline, framing, codecs, handlers | Framing, threads, error handling, everything else |
+| What you write besides messages | **Nothing: callbacks on a builder** | A service definition, generated stubs (protoc plugin) and stream observers | Pipeline, framing, codecs, handlers | Framing, threads, error handling, everything else |
 | Dependencies | **`protobuf-java` and `slf4j-api`** | Several `grpc-*` artifacts and a transport, with their own dependencies | Netty modules | None |
 | Handlers that block | **Allowed: each connection has its own virtual thread, so only that connection waits** | Run on an executor you configure; a stream's observer isn't thread-safe, so concurrent senders must synchronize | Must not block the event loop, which other connections share; offload to your own executor | Up to your own threading |
 | Backpressure | **Bounded queue per connection, four overflow policies, every message written or reported back** | Manual (`isReady`, `setOnReadyHandler`); messages sent while not ready are buffered without limit | Manual (channel writability and watermarks) | A blocked write, which never times out without extra code |
@@ -157,17 +151,13 @@ Your generated protobuf classes must be compatible with the `protobuf-java` vers
 ### Server
 
 ```java
-ProtoServerListener listener = ProtoServerListener.builder()
+ProtoServer server = ProtoServer.builder(3456)
         .onConnected(connection -> log.info("{} connected", connection))
         .onMessage(HeartBeatRequest.class, (connection, request) ->
                 connection.send(HeartBeatResponse.newBuilder()      // reply on the same connection
                         .setRequestTimeMillis(request.getRequestTimeMillis())
                         .build()))
         .onDisconnected((connection, reason, cause) -> log.info("{} disconnected: {}", connection, reason))
-        .build();
-
-ProtoServer server = ProtoServer.builder(3456)
-        .listener(listener)
         .build();
 server.start();                  // binds, then accepts connections on a virtual thread
 // ...
@@ -178,13 +168,11 @@ server.close();                  // close every connection gracefully, then stop
 ### Client
 
 ```java
-ProtoClientListener listener = ProtoClientListener.builder()
-        .onMessage(HeartBeatResponse.class, (client, response) ->
+try (ProtoClient client = ProtoClient.builder("localhost", 3456)
+        .onMessage(HeartBeatResponse.class, (c, response) ->
                 log.info("Round trip: {} ms", System.currentTimeMillis() - response.getRequestTimeMillis()))
-        .onSendFailure((client, message, cause) -> log.warn("Not sent: {}", cause.reason()))
-        .build();
-
-try (ProtoClient client = ProtoClient.builder("localhost", 3456).listener(listener).build()) {
+        .onSendFailure((c, message, cause) -> log.warn("Not sent: {}", cause.reason()))
+        .build()) {
     client.connect();            // blocks until connected; throws IOException on failure
     client.send(HeartBeatRequest.newBuilder()
             .setRequestTimeMillis(System.currentTimeMillis())
@@ -200,7 +188,8 @@ try (ProtoClient client = ProtoClient.builder("localhost", 3456).listener(listen
 A client is single-use: once closed, for whatever reason, it can't connect again. Build a new one from the same builder, which is reusable:
 
 ```java
-ProtoClient.Builder builder = ProtoClient.builder("localhost", 3456).listener(listener);
+ProtoClient.Builder builder = ProtoClient.builder("localhost", 3456)
+        .onMessage(PriceUpdate.class, this::onPriceUpdate);
 long backoffMillis = 500;
 while (running) {
     ProtoClient client = builder.build();
@@ -208,7 +197,7 @@ while (running) {
         client.connect();
         backoffMillis = 500;
         client.awaitClosed();    // returns after onDisconnected
-    } catch (IOException e) {    // no listener method is called when connect() fails
+    } catch (IOException e) {    // no callback is called when connect() fails
         Thread.sleep(backoffMillis);
         backoffMillis = Math.min(backoffMillis * 2, 30_000);
     }
@@ -227,25 +216,27 @@ Working examples are in [`protobuf-nio-sample`](protobuf-nio-sample/src/main/jav
 
 Then, in another terminal, run `SampleClient` (one request), `SampleClientBenchmarkTest` (throughput) or `MultiClientsTest` (15,000 clients) the same way.
 
-## Listeners and threads
+## Callbacks and threads
 
-`ProtoServerListener` and `ProtoClientListener` have the same four methods, all optional no-ops. You can implement the interface, or use its `builder()`, which takes lambdas and dispatches messages by type (exact class match, no allocation per message):
+The server and client builders take the callbacks, all optional:
 
-| Method | Thread | Called when |
+| Builder method | Thread | Called when |
 |---|---|---|
-| `onConnected(connection)` | reader | The connection is open: the TCP connect, TLS handshake and protocol preamble have all succeeded. |
-| `onMessage(connection, message)` | reader | A message has been received and parsed. With the builder, `onMessage(Type.class, handler)` per type, and `onOtherMessage(handler)` for the rest (by default, logged at WARN once per type). |
-| `onSendFailure(connection, message, cause)` | writer, or the sending thread | A message passed to `send` wasn't written. `cause.reason()` is `REJECTED`, `DROPPED`, `CLOSED` or `WRITE_FAILED` (see [Sending and backpressure](#sending-and-backpressure)). |
-| `onDisconnected(connection, reason, cause)` | reader | The connection closed. Always the last callback for the connection, exactly once. `reason` is a `DisconnectReason`; `cause` is the exception, or `null` for a normal close. |
+| `onConnected(handler)` | reader | The connection is open: the TCP connect, TLS handshake and protocol preamble have all succeeded. |
+| `onMessage(Type.class, handler)` | reader | A message of exactly that type has been received and parsed. One handler per type, found without allocating per message. |
+| `onOtherMessage(handler)` | reader | A message of a type without its own handler. Without this, such messages are logged at WARN once per type and dropped. |
+| `onRawMessage(Type.class, handler)` | reader | A message of that type has arrived; it gets the unparsed bytes instead (see [Raw handlers](#raw-handlers)). |
+| `onSendFailure(handler)` | writer, or the sending thread | A message passed to `send` wasn't written. `cause.reason()` is `REJECTED`, `DROPPED`, `CLOSED` or `WRITE_FAILED` (see [Sending and backpressure](#sending-and-backpressure)). |
+| `onDisconnected(handler)` | reader | The connection closed. Always the last callback for the connection, exactly once. `reason` is a `DisconnectReason`; `cause` is the exception, or `null` for a normal close. |
 
-On the server, the first argument is a `ProtoConnection`; on the client, it's the `ProtoClient` itself.
+On the server, each callback gets the `ProtoConnection`; on the client, the `ProtoClient` itself. A class of your own can handle the events through method references, for example `.onMessage(Order.class, handler::onOrder).onDisconnected(handler::onDisconnected)`.
 
 The threading contract:
 
 - **Each connection has two virtual threads**: a reader, which runs `onConnected`, `onMessage` and `onDisconnected` in that order and never concurrently, and a writer, which runs `onSendFailure`. `REJECTED` and `DROPPED` failures are reported on the thread that called `send` (or `broadcast`), before it returns.
-- **Callbacks for different connections run concurrently.** A server listener, or a listener shared by several clients, must be thread-safe.
+- **Callbacks for different connections run concurrently.** A server's callbacks, or the callbacks of a builder shared by several clients, must be thread-safe.
 - **Handlers may block.** Blocking in `onMessage` stalls only that connection: its next message isn't read until the handler returns (and TCP flow control eventually slows the peer down). Other connections carry on.
-- **A connection that fails before it opens is never reported.** If the TCP connect, TLS handshake or preamble fails, no listener method is called at all; the client's `connect()` throws instead.
+- **A connection that fails before it opens is never reported.** If the TCP connect, TLS handshake or preamble fails, no callback is called at all; the client's `connect()` throws instead.
 - **Exceptions thrown by a callback are logged and ignored.** The connection carries on.
 - `attach(object)` and `attachment()` keep your own per-connection state, such as a session after login.
 
@@ -262,7 +253,7 @@ Each connection's queue is bounded by `maxPendingMessages` (default 1,000,000) a
 | `DROP_OLDEST` | Drops queued messages, oldest first, until the new one fits, reports each as `DROPPED`, and returns `true`. For data where only the latest value matters, such as prices. |
 | `DISCONNECT` | Returns `false` and closes the connection at once with `SEND_QUEUE_OVERFLOW`. For servers that would rather drop a slow consumer than buffer for it. |
 
-Whenever `send` returns `false` because the queue is full, `onSendFailure(REJECTED)` has already run on the calling thread. Until a connection starts closing, every message passed to `send` is either written or reported to `onSendFailure`. Once closing has started, `send` returns `false` without calling the listener, and anything still queued when the connection closes is reported as `CLOSED`, before `onDisconnected`.
+Whenever `send` returns `false` because the queue is full, `onSendFailure(REJECTED)` has already run on the calling thread. Until a connection starts closing, every message passed to `send` is either written or reported to `onSendFailure`. Once closing has started, `send` returns `false` without any callback, and anything still queued when the connection closes is reported as `CLOSED`, before `onDisconnected`.
 
 `pendingMessages()` and `pendingBytes()` show how far behind a connection is.
 
@@ -294,7 +285,7 @@ Both builders (`ProtoClient.builder(host, port)` and `ProtoServer.builder(port)`
 
 | Setting | Default | Description |
 |---|---|---|
-| `listener(listener)` | no-op | See [Listeners and threads](#listeners-and-threads). |
+| `onConnected`, `onMessage`, `onOtherMessage`, `onSendFailure`, `onDisconnected` | none | See [Callbacks and threads](#callbacks-and-threads). |
 | `handshakeTimeout(duration)` | 10 s | Time allowed for the TLS handshake and the protocol preamble. |
 | `readTimeout(duration)` | none | Close if nothing is received for this long. Any frame resets it, heartbeats included. |
 | `heartbeatInterval(duration)` | none | Send a heartbeat frame when nothing has been sent for this long. Set it on the peer, below this side's `readTimeout`. |
@@ -309,7 +300,7 @@ Both builders (`ProtoClient.builder(host, port)` and `ProtoServer.builder(port)`
 | `sendTimeout(duration)` | 10 s | How long `BLOCK` waits for room. `Duration.ZERO` = not at all. |
 | `socketOption(option, value)` | `TCP_NODELAY` on | Any `java.net.SocketOption`, such as `SO_SNDBUF` or `SO_KEEPALIVE`. Unsupported options are ignored. |
 | `allowedMessageTypes(types...)` | any | Accept only these message types (see [Untrusted peers](#untrusted-peers)). |
-| `rawHandler(type, handler)` | none | Receive this type unparsed (see [Raw handlers](#raw-handlers)). |
+| `onRawMessage(type, handler)` | none | Receive this type unparsed (see [Raw handlers](#raw-handlers)). |
 | `classLoader(loader)` | context class loader | Loads received message classes. The default is the thread's context class loader when `build()` runs. |
 | `threadFactory(factory)` | virtual threads | Creates the reader and writer threads (and the server's acceptor thread). |
 | `tls(sslContext)` | none | Use TLS (see [TLS](#tls)). |
@@ -339,7 +330,7 @@ To process a high-volume message type without parsing it into a new object each 
 PriceUpdate.Builder update = PriceUpdate.newBuilder();   // reused: this client's reader thread is the only caller
 
 ProtoClient client = ProtoClient.builder("prices.example.com", 3456)
-        .rawHandler(PriceUpdate.class, (c, payload) -> {
+        .onRawMessage(PriceUpdate.class, (c, payload) -> {
             try {
                 update.clear().mergeFrom(payload.array(), payload.arrayOffset() + payload.position(), payload.remaining());
             } catch (InvalidProtocolBufferException e) {
@@ -386,7 +377,6 @@ ProtoServer server = ProtoServer.builder(8443)
         .maxConnections(10_000)
         .maxPendingBytes(4 * 1024 * 1024)
         .overflowPolicy(OverflowPolicy.DISCONNECT)
-        .listener(listener)
         .build();
 ```
 
@@ -400,7 +390,6 @@ TLS goes through the JDK's `SSLSocket`. Pass an `SSLContext` to both builders: i
 ProtoServer server = ProtoServer.builder(8443)
         .tls(serverContext)                     // e.g. key material from a PKCS12 keystore
         .tlsClientAuth(TlsClientAuth.NEED)      // optional: require client certificates (default NONE)
-        .listener(listener)
         .build();
 
 ProtoClient client = ProtoClient.builder("server.example.com", 8443)
@@ -410,7 +399,7 @@ client.connect();                               // throws an SSLException if the
 SSLSession session = client.tlsSession();
 ```
 
-- The TLS handshake runs on each connection's own thread, within `handshakeTimeout`, before the protocol preamble. If it fails, `connect()` throws and no listener method is called on either side.
+- The TLS handshake runs on each connection's own thread, within `handshakeTimeout`, before the protocol preamble. If it fails, `connect()` throws and no callback is called on either side.
 - The client checks that the server's certificate matches the host name it was given, as HTTPS clients do. `tlsHostnameVerification(false)` turns that off, for tests only.
 - Both sides must use TLS: a TLS client and a plain server (or the reverse) fail to connect.
 - A handshake rejected by the server (for example a missing client certificate with `TlsClientAuth.NEED`) may surface on the client as a connection reset rather than an `SSLException`: with TLS 1.3, the client's side of the handshake is over before the server checks its certificate.
@@ -487,7 +476,7 @@ protobuf-nio follows [Semantic Versioning](https://semver.org/), and [`CHANGELOG
 So:
 
 - **Patch releases** (2.0.x) fix bugs.
-- **Minor releases** (2.x) add features without breaking code that compiles against the previous version. They may add builder settings, methods to `ProtoClient`, `ProtoServer` and `ProtoConnection` (which applications use but don't implement), default methods to the listener interfaces, and constants to the enums: give a `switch` over `DisconnectReason` or `SendException.Reason` a `default` branch.
+- **Minor releases** (2.x) add features without breaking code that compiles against the previous version. They may add builder settings and callbacks, methods to `ProtoClient`, `ProtoServer` and `ProtoConnection` (which applications use but don't implement), and constants to the enums: give a `switch` over `DisconnectReason` or `SendException.Reason` a `default` branch. The handler interfaces you implement with lambdas don't change.
 - **Major releases** may change or remove API, change the wire protocol incompatibly, or raise the minimum Java version.
 
 ## Building

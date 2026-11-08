@@ -1,7 +1,6 @@
 package io.github.quantranuk.protobuf.nio.sample;
 
 import io.github.quantranuk.protobuf.nio.ProtoClient;
-import io.github.quantranuk.protobuf.nio.ProtoClientListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,12 +27,11 @@ public class MultiClientsTest {
 
     public static void main(String[] args) throws Exception {
         CountDownLatch responses = new CountDownLatch(NO_OF_CLIENTS);
-        // One listener for every client: callbacks for different clients run concurrently, so it must be thread-safe
-        ProtoClientListener listener = ProtoClientListener.builder()
+        // One builder for every client: they share its callbacks, which run concurrently for different clients, so they
+        // must be thread-safe
+        ProtoClient.Builder builder = ProtoClient.builder("localhost", SampleServer.PORT)
                 .onMessage(HeartBeat.HeartBeatResponse.class, (client, response) -> responses.countDown())
-                .onSendFailure((client, message, cause) -> LOGGER.error("{} couldn't send: {}", client, cause.reason()))
-                .build();
-        ProtoClient.Builder builder = ProtoClient.builder("localhost", SampleServer.PORT).listener(listener);
+                .onSendFailure((client, message, cause) -> LOGGER.error("{} couldn't send: {}", client, cause.reason()));
 
         List<ProtoClient> clients = new ArrayList<>(NO_OF_CLIENTS);
         long start = System.nanoTime();

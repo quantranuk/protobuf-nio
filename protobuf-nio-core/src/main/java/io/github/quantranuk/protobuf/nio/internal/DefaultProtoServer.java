@@ -2,7 +2,6 @@ package io.github.quantranuk.protobuf.nio.internal;
 
 import io.github.quantranuk.protobuf.nio.ProtoConnection;
 import io.github.quantranuk.protobuf.nio.ProtoServer;
-import io.github.quantranuk.protobuf.nio.ProtoServerListener;
 import com.google.protobuf.MessageLite;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,7 +50,7 @@ public final class DefaultProtoServer implements ProtoServer {
     private final int backlog;
     private final int maxConnections;
     private final ConnectionConfig config;
-    private final ProtoServerListener listener;
+    private final Callbacks<ProtoConnection> callbacks;
 
     private final Map<Long, DefaultProtoConnection> all = new ConcurrentHashMap<>();
     private final Set<ProtoConnection> open = ConcurrentHashMap.newKeySet();
@@ -66,12 +65,12 @@ public final class DefaultProtoServer implements ProtoServer {
     private final Throttle acceptFailureWarnings = new Throttle();
 
     public DefaultProtoServer(InetSocketAddress bindAddress, int backlog, int maxConnections, ConnectionConfig config,
-                              ProtoServerListener listener) {
+                              Callbacks<ProtoConnection> callbacks) {
         this.bindAddress = bindAddress;
         this.backlog = backlog;
         this.maxConnections = maxConnections;
         this.config = config;
-        this.listener = listener;
+        this.callbacks = callbacks;
     }
 
     @Override
@@ -129,7 +128,7 @@ public final class DefaultProtoServer implements ProtoServer {
                 closeQuietly(accepted);
                 continue;
             }
-            DefaultProtoConnection connection = new DefaultProtoConnection(this, accepted, config, listener);
+            DefaultProtoConnection connection = new DefaultProtoConnection(this, accepted, config, callbacks);
             all.put(connection.id(), connection);
             connection.connection.closedFuture().whenComplete((reason, error) -> all.remove(connection.id()));
             try {
@@ -141,8 +140,8 @@ public final class DefaultProtoServer implements ProtoServer {
     }
 
     /**
-     * Closes the oldest connection still in its handshake, to make room for a new one. It's never reported to the
-     * listener. Acceptor thread only.
+     * Closes the oldest connection still in its handshake, to make room for a new one. It never gets a callback.
+     * Acceptor thread only.
      *
      * @return false if every connection has finished its handshake
      */

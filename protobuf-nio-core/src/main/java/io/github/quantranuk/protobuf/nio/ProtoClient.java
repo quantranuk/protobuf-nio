@@ -1,5 +1,6 @@
 package io.github.quantranuk.protobuf.nio;
 
+import io.github.quantranuk.protobuf.nio.internal.Callbacks;
 import io.github.quantranuk.protobuf.nio.internal.ConnectionConfig;
 import io.github.quantranuk.protobuf.nio.internal.DefaultProtoClient;
 import com.google.protobuf.MessageLite;
@@ -9,26 +10,42 @@ import javax.net.ssl.SSLSession;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketOption;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.Consumer;
 
 /**
  * A single-use client connection: build it, {@link #connect()} it, {@link #close()} it. Build a new one to reconnect
  * (the {@link Builder} is reusable).
  * <pre>{@code
- * try (ProtoClient client = ProtoClient.builder("localhost", 3456).listener(listener).build()) {
- *     client.connect();
- *     client.send(request);
- * }
+ * ProtoClient client = ProtoClient.builder("localhost", 3456)
+ *         .onMessage(Pong.class, (c, pong) -> System.out.println(pong.getText()))
+ *         .build();
+ * client.connect();
+ * client.send(Ping.newBuilder().setText("ping").build());
+ * // ...
+ * client.close();
  * }</pre>
  * States: new (after {@code build()}), connecting (during {@code connect()}), open, closed. All methods are
  * thread-safe. {@code equals}/{@code hashCode} are identity; {@code toString()} is
  * {@code "ProtoClient#<id>[<remote address>]"}.
- * <p>
- * Each connected client uses two virtual threads: a reader, which runs {@code onConnected}, {@code onMessage} and
- * {@code onDisconnected}, and a writer, which runs {@code onSendFailure}. See {@link ProtoClientListener}.
+ *
+ * <h2>Callbacks and threads</h2>
+ * The builder sets what happens on the client's events. A connected client has a reader and a writer virtual thread:
+ * <ul>
+ *     <li>The reader thread runs {@code onConnected}, {@code onMessage} (and raw handlers) and {@code onDisconnected},
+ *     in that order and never overlapping.</li>
+ *     <li>The writer thread runs {@code onSendFailure}, except for {@link SendException.Reason#REJECTED} and
+ *     {@link SendException.Reason#DROPPED}, which run on the thread that called {@code send()}, before it returns.</li>
+ *     <li>{@code onDisconnected} is the last callback, exactly once, after every {@code onSendFailure}.</li>
+ *     <li>If {@link #connect()} fails, no callback is called.</li>
+ * </ul>
+ * A callback may block; that only delays this client. An exception thrown by a callback is logged and ignored, and the
+ * client carries on. Clients built from the same builder share its callbacks, which then run concurrently for
+ * different clients, so they must be thread-safe.
  */
 public interface ProtoClient extends AutoCloseable {
 
@@ -62,8 +79,8 @@ public interface ProtoClient extends AutoCloseable {
 
     /**
      * Connects, completes the protocol preamble, then returns. {@code onConnected} runs on the reader thread before any
-     * {@code onMessage}, and may still be running when this returns. On failure the client is closed and no listener
-     * method is called.
+     * {@code onMessage}, and may still be running when this returns. On failure the client is closed and no callback
+     * is called.
      * <p>
      * The host name is resolved here, not at {@code build()}.
      *
@@ -129,10 +146,10 @@ public interface ProtoClient extends AutoCloseable {
      * Until closing starts, every message passed to send is either written or reported to {@code onSendFailure}: when
      * this returns false because the queue is full, {@code onSendFailure(REJECTED)} has already run on the calling
      * thread, and {@code DROP_OLDEST} reports what it drops as {@code DROPPED}, also on the calling thread.
-     * Once closing has started, send returns false without calling the listener ({@code onDisconnected} stays last).
+     * Once closing has started, send returns false without any callback ({@code onDisconnected} stays last).
      * While {@code connect()} is running, messages are queued and sent after the preamble; if the queue fills up
-     * meanwhile, send returns false without calling the listener ({@code DROP_OLDEST} then rejects rather than drops),
-     * and if {@code connect()} fails, no listener method is called at all.
+     * meanwhile, send returns false without any callback ({@code DROP_OLDEST} then rejects rather than drops),
+     * and if {@code connect()} fails, no callback is called at all.
      *
      * @param message the message to send
      * @return true if queued; false if not (queue full, or closing or closed). If interrupted while waiting for room,
@@ -163,7 +180,7 @@ public interface ProtoClient extends AutoCloseable {
      * its
      * writer thread it returns at once; from its reader thread it waits only for the queue to be written). Idempotent.
      * <p>
-     * Before {@code connect()}: marks the client closed, without listener calls. While connecting: cancels, and
+     * Before {@code connect()}: marks the client closed, without callbacks. While connecting: cancels, and
      * {@code connect()} throws.
      */
     @Override
@@ -179,7 +196,7 @@ public interface ProtoClient extends AutoCloseable {
     DisconnectReason awaitClosed() throws InterruptedException;
 
     /**
-     * Your own state, not used by the library (for example which session a shared listener is serving). Visible to
+     * Your own state, not used by the library (for example which session shared callbacks are serving). Visible to
      * every thread once {@link #attach} has returned.
      *
      * @param <T> the type to cast the attachment to
@@ -203,7 +220,7 @@ public interface ProtoClient extends AutoCloseable {
     final class Builder {
         private final InetSocketAddress address;
         private final ConnectionConfig.Builder config = ConnectionConfig.builder();
-        private ProtoClientListener listener = new ProtoClientListener() { };
+        private final Callbacks.Builder<ProtoClient> callbacks = Callbacks.builder();
         private Duration connectTimeout = Duration.ofSeconds(10);
 
         private Builder(InetSocketAddress address) {
@@ -211,29 +228,89 @@ public interface ProtoClient extends AutoCloseable {
         }
 
         /**
-         * Sets the listener that receives the events of the client. Default: a no-op listener.
+         * Called when the client is open: the TCP connect, the TLS handshake (when configured) and the protocol preamble
+         * have succeeded. Runs on the reader thread, before any {@code onMessage}; {@link ProtoClient#connect()} may
+         * return before or while it runs. Default: nothing.
          *
-         * @param listener receives the client's events
+         * @param handler called with the client once it's open
          * @return this builder
          */
-        public Builder listener(ProtoClientListener listener) {
-            this.listener = Objects.requireNonNull(listener, "listener");
+        public Builder onConnected(Consumer<ProtoClient> handler) {
+            callbacks.onConnected(handler);
+            return this;
+        }
+
+        /**
+         * Handles received messages whose class is exactly {@code type} (subclasses and other types don't match). Runs
+         * on the reader thread, in the order the server sent the messages; the next message isn't read until the handler
+         * returns.
+         *
+         * @param type    the generated message class
+         * @param handler called for each message of that type
+         * @param <T>     the message type
+         * @return this builder
+         * @throws IllegalArgumentException if a handler for this type is already registered
+         */
+        @SuppressWarnings("unchecked")
+        public <T extends MessageLite> Builder onMessage(Class<T> type, MessageHandler<? super T> handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onMessage(type, (client, message) -> handler.onMessage(client, (T) message));
+            return this;
+        }
+
+        /**
+         * Handles received messages of types without their own {@link #onMessage} handler. Without it, they're logged
+         * at WARN once per type and dropped.
+         *
+         * @param handler called on the reader thread for each such message
+         * @return this builder
+         */
+        public Builder onOtherMessage(MessageHandler<MessageLite> handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onOtherMessage(handler::onMessage);
             return this;
         }
 
         /**
          * Optional low-garbage path: messages of this type skip parsing and go to {@code handler} with their raw
-         * bytes, instead of the listener's {@code onMessage}. The type is always accepted, even when
-         * {@link #allowedMessageTypes} doesn't list it.
+         * bytes, instead of {@code onMessage}. The type is always accepted, even when {@link #allowedMessageTypes}
+         * doesn't list it.
          *
-         * @param type the generated message class
-         * @param handler receives the payload of each message of that type
+         * @param type    the generated message class
+         * @param handler receives the payload of each message of that type, on the reader thread
          * @return this builder
          * @throws IllegalArgumentException if the type already has a raw handler, or isn't a generated protobuf message
          *                                  class
          */
-        public Builder rawHandler(Class<? extends MessageLite> type, ProtoClientListener.RawMessageHandler handler) {
+        public Builder onRawMessage(Class<? extends MessageLite> type, RawMessageHandler handler) {
             config.rawHandler(type, handler);
+            return this;
+        }
+
+        /**
+         * Called for a message passed to {@link ProtoClient#send} that wasn't written. Runs on the writer thread,
+         * except for {@link SendException.Reason#REJECTED} and {@link SendException.Reason#DROPPED}, which run on the
+         * thread that called {@code send()}. Default: nothing.
+         *
+         * @param handler called for each message that wasn't written
+         * @return this builder
+         */
+        public Builder onSendFailure(SendFailureHandler handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onSendFailure(handler::onSendFailure);
+            return this;
+        }
+
+        /**
+         * Called when the client closes: the last callback, exactly once, on the reader thread, after every
+         * {@code onSendFailure}. Not called if {@link ProtoClient#connect()} failed. Default: nothing.
+         *
+         * @param handler called once when the client closes
+         * @return this builder
+         */
+        public Builder onDisconnected(DisconnectHandler handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onDisconnected(handler::onDisconnected);
             return this;
         }
 
@@ -470,7 +547,66 @@ public interface ProtoClient extends AutoCloseable {
          * @return a new, unconnected client
          */
         public ProtoClient build() {
-            return new DefaultProtoClient(address, connectTimeout, config.build(), listener);
+            return new DefaultProtoClient(address, connectTimeout, config.build(), callbacks.build());
         }
+    }
+
+    /**
+     * Handles received messages of one type; see {@link Builder#onMessage}.
+     *
+     * @param <T> the message type
+     */
+    @FunctionalInterface
+    interface MessageHandler<T extends MessageLite> {
+        /**
+         * Called on the client's reader thread.
+         *
+         * @param client  the client that received the message
+         * @param message the parsed message
+         */
+        void onMessage(ProtoClient client, T message);
+    }
+
+    /** Handles a message of a type registered with {@link Builder#onRawMessage}, without parsing it. */
+    @FunctionalInterface
+    interface RawMessageHandler {
+        /**
+         * Called on the client's reader thread, like {@code onMessage}.
+         *
+         * @param client  the client that received the message
+         * @param payload the unparsed protobuf bytes, from its position to its limit. To avoid allocating per message,
+         *                it's a view over the read buffer that's reused: it's valid only during the call, and its
+         *                bytes mustn't be modified. It's a heap buffer, so {@code payload.array()},
+         *                {@code arrayOffset() + position()} and {@code remaining()} give the bytes without copying,
+         *                for example to parse into a reused builder. Copy what you need to keep.
+         */
+        void onMessage(ProtoClient client, ByteBuffer payload);
+    }
+
+    /** Called for a message that wasn't written; see {@link Builder#onSendFailure}. */
+    @FunctionalInterface
+    interface SendFailureHandler {
+        /**
+         * See {@link Builder#onSendFailure}.
+         *
+         * @param client  the client the message was sent on
+         * @param message the message that wasn't written
+         * @param cause   why; {@link SendException#reason()} tells the cases apart
+         */
+        void onSendFailure(ProtoClient client, MessageLite message, SendException cause);
+    }
+
+    /** Called when the client closes; see {@link Builder#onDisconnected}. */
+    @FunctionalInterface
+    interface DisconnectHandler {
+        /**
+         * See {@link Builder#onDisconnected}.
+         *
+         * @param client the client that closed
+         * @param reason why it closed
+         * @param cause  the exception behind the reason, or {@code null} for {@link DisconnectReason#CLOSED_LOCALLY}
+         *               and {@link DisconnectReason#CLOSED_BY_PEER}
+         */
+        void onDisconnected(ProtoClient client, DisconnectReason reason, Throwable cause);
     }
 }

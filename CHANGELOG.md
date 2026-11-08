@@ -16,7 +16,8 @@ The first release on Maven Central, as `io.github.quantranuk:protobuf-nio-core`.
   already parsed. Messages are identified by their Java class name, so there are no type IDs to register.
 - Virtual threads with blocking sockets: each connection has a reader and a writer virtual thread. A connection's
   callbacks run in order on its reader thread, and a handler may block without stalling other connections.
-- `ProtoServerListener` and `ProtoClientListener`, with lambda-friendly builders that dispatch messages by type.
+- Callbacks set directly on the server and client builders (`onMessage(Type.class, handler)`, `onConnected`,
+  `onDisconnected` and so on), with each message dispatched to its handler by type.
 - Backpressure: bounded send queues (`maxPendingMessages`, `maxPendingBytes`) and four overflow policies: `BLOCK`,
   `REJECT`, `DROP_OLDEST` and `DISCONNECT`. Every message passed to `send` is either written or reported to
   `onSendFailure`.
