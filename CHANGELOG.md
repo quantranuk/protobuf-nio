@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) as described in the README's
 [Versioning](README.md#versioning) section.
 
-## [Unreleased]
+## [2.0.0] - 2026-11-08
 
 The first release on Maven Central, as `io.github.quantranuk:protobuf-nio-core`. Requires Java 25 or later.
 
@@ -37,4 +37,4 @@ The first release on Maven Central, as `io.github.quantranuk:protobuf-nio-core`.
 - The Java module `io.github.quantranuk.protobuf.nio`, exporting only the API package.
 - Javadoc for the whole public API.
 
-[Unreleased]: https://github.com/quantranuk/protobuf-nio/commits/master
+[2.0.0]: https://github.com/quantranuk/protobuf-nio/releases/tag/v2.0.0

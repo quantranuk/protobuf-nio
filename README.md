@@ -128,25 +128,23 @@ After `./mvnw install`, start the server and run the benchmark or the many-clien
 
 ## Installation
 
-Version 2.0 isn't published yet. Build and install it into your local Maven repository:
-
-```bash
-git clone https://github.com/quantranuk/protobuf-nio.git
-cd protobuf-nio
-./mvnw clean install
-```
-
-Then add the dependency:
+Maven:
 
 ```xml
 <dependency>
     <groupId>io.github.quantranuk</groupId>
     <artifactId>protobuf-nio-core</artifactId>
-    <version>2.0.0-SNAPSHOT</version>
+    <version>2.0.0</version>
 </dependency>
 ```
 
-Your generated protobuf classes must be compatible with the `protobuf-java` version the library brings in (4.x). If your project declares its own `protobuf-java` version, Maven uses yours.
+Gradle:
+
+```kotlin
+implementation("io.github.quantranuk:protobuf-nio-core:2.0.0")
+```
+
+Requires Java 25 or later. Your generated protobuf classes must be compatible with the `protobuf-java` version the library brings in (4.x). If your project declares its own `protobuf-java` version, Maven uses yours.
 
 ## Usage
 

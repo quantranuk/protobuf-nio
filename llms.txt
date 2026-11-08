@@ -4,7 +4,7 @@
 
 ## Install
 
-Maven coordinates: `io.github.quantranuk:protobuf-nio-core`. Version 2.0.0 isn't on Maven Central yet: build it with `./mvnw install` from https://github.com/quantranuk/protobuf-nio and use version `2.0.0-SNAPSHOT`.
+Maven coordinates: `io.github.quantranuk:protobuf-nio-core:2.0.0` (Maven Central). Requires Java 25 or later.
 
 ## Complete example
 
