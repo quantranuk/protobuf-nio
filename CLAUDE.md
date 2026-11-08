@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Java library for sending and receiving protobuf messages over TCP with no netty/mina dependency.
 
-**Status: mid-rewrite to 2.0.** 1.x (async NIO, `java.nio.channels.Asynchronous*`, no TLS) has been removed from `master`; its last version is the git tag `1.x-final`, which is the reference for 1.x behaviour, its tests (`ChannelRobustnessTest`) and its benchmark baseline. 2.0 is a rewrite on virtual threads with blocking sockets, a new API (`ProtoClient` / `ProtoServer` / `ProtoConnection`), TLS, backpressure and a one-time protocol preamble. The frame format is unchanged. There's no backward compatibility with 1.x, which had no users.
+**Status: 2.0, feature-complete, not yet released to Maven Central** (version `2.0.0-SNAPSHOT`). 2.0 is a rewrite on virtual threads with blocking sockets, a new API (`ProtoClient` / `ProtoServer` / `ProtoConnection`), TLS, backpressure and a one-time protocol preamble. The frame format is unchanged. There's no backward compatibility with 1.x, which had no users. 1.x (async NIO, `java.nio.channels.Asynchronous*`, no TLS) is gone from `master`; its last version is the git tag `1.x-final`, the reference for 1.x behaviour, its tests (`ChannelRobustnessTest`) and its benchmark baseline. The README documents the 2.0 API for users and must stay in step with it (configuration table, defaults, threading contract).
 
 ## Build & test
 
@@ -25,7 +25,7 @@ Protobuf code is generated at build time by `io.github.ascopes:protobuf-maven-pl
 - core: `src/test/proto/TestHeartBeat.proto` → test classes (`generate-test`)
 - sample: `src/main/proto/HeartBeat.proto` → main classes (`generate`)
 
-`protobuf-nio-sample` is **not in the root `<modules>` list** during the rewrite: it still uses the 1.x API and goes back into the build once it's ported to 2.0. Its "tests" (`SampleServer`, `SampleClient`, `SampleClientBenchmarkTest`, `MultiClientsTest`) are `main()` programs in `src/main`, not JUnit tests.
+`protobuf-nio-sample` is built but not meant to be published. Its "tests" (`SampleServer`, `SampleClient`, `SampleClientBenchmarkTest`, `MultiClientsTest`) are `main()` programs in `src/main`, not JUnit tests, so the build only compiles them. Run them after `./mvnw install`: start the server with `./mvnw -q -pl protobuf-nio-sample exec:java -Dexec.mainClass=io.github.quantranuk.protobuf.nio.sample.SampleServer`, then run a client the same way in another terminal. `MultiClientsTest` opens 15,000 connections, so both processes need `ulimit -n` above that.
 
 ## Architecture (protobuf-nio-core)
 

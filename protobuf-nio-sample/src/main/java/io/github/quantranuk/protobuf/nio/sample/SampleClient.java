@@ -1,43 +1,39 @@
 package io.github.quantranuk.protobuf.nio.sample;
 
-import io.github.quantranuk.protobuf.nio.ProtoChannelFactory;
-import io.github.quantranuk.protobuf.nio.ProtoSocketChannel;
-import com.google.protobuf.Message;
+import io.github.quantranuk.protobuf.nio.ProtoClient;
+import io.github.quantranuk.protobuf.nio.ProtoClientListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.SocketAddress;
+import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
+/** Sends one {@code HeartBeatRequest} to {@link SampleServer} and prints the response. */
 public class SampleClient {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(SampleClient.class);
 
-    private static final String SERVER_HOST = "localhost";
-    private static final int SERVER_PORT = 3456;
+    public static void main(String[] args) throws Exception {
+        CompletableFuture<HeartBeat.HeartBeatResponse> response = new CompletableFuture<>();
+        ProtoClientListener listener = ProtoClientListener.builder()
+                .onMessage(HeartBeat.HeartBeatResponse.class, (client, message) -> response.complete(message))
+                .onSendFailure((client, message, cause) ->
+                        LOGGER.error("Couldn't send {}: {}", message.getClass().getSimpleName(), cause.reason()))
+                .onDisconnected((client, reason, cause) ->
+                        response.completeExceptionally(new IOException("Disconnected: " + reason, cause)))
+                .build();
 
-    private static MessageFactory messageFactory;
-    private static ProtoSocketChannel clientChannel;
-
-    public static void main(String[] args) {
-        messageFactory = new MessageFactory();
-        clientChannel = ProtoChannelFactory.newClient(SERVER_HOST, SERVER_PORT).build();
-        clientChannel.addMessageReceivedHandler(SampleClient::onMsgReceived);
-        clientChannel.addMessageSendFailureHandler(SampleClient::onMsgSendFailure);
-        clientChannel.connect();
-        clientChannel.sendMessage(messageFactory.createHeartBeatRequest());
-    }
-
-    private static void onMsgReceived(SocketAddress socketAddress, Message message) {
-        if (message instanceof HeartBeat.HeartBeatResponse heartBeatResponse) {
-            LOGGER.info("Received message from {}:\n{}", socketAddress, heartBeatResponse);
-            clientChannel.disconnect();
-        } else {
-            LOGGER.warn("Received unknown message from {}:\n{}", socketAddress, message);
+        try (ProtoClient client = ProtoClient.builder("localhost", SampleServer.PORT).listener(listener).build()) {
+            client.connect();
+            client.send(MessageFactory.heartBeatRequest(1));
+            HeartBeat.HeartBeatResponse heartBeatResponse = response.get(10, TimeUnit.SECONDS);
+            LOGGER.info("Received from {} after {} ms:\n{}", client.remoteAddress(),
+                    System.currentTimeMillis() - heartBeatResponse.getRequestTimeMillis(), heartBeatResponse);
+        } catch (TimeoutException e) {
+            LOGGER.error("No response within 10 seconds");
         }
-    }
-
-    private static void onMsgSendFailure(SocketAddress socketAddress, Message message, Throwable t) {
-        LOGGER.error("An error has occurred while sending msg {}", message.getClass().getName(), t);
     }
 
 }

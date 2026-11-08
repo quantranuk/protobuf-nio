@@ -1,66 +1,78 @@
 package io.github.quantranuk.protobuf.nio.sample;
 
-import io.github.quantranuk.protobuf.nio.ProtoChannelFactory;
-import io.github.quantranuk.protobuf.nio.ProtoSocketChannel;
-import com.google.protobuf.Message;
+import io.github.quantranuk.protobuf.nio.ProtoClient;
+import io.github.quantranuk.protobuf.nio.ProtoClientListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
+/**
+ * Connects 15,000 clients to {@link SampleServer}; each sends one request and waits for its response.
+ * <p>
+ * Each connection uses two virtual threads and one file descriptor on each side, so both processes need a file
+ * descriptor limit above 15,000 ({@code ulimit -n}). The clients also use 15,000 ephemeral ports.
+ */
 public class MultiClientsTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MultiClientsTest.class);
 
-    private static final String SERVER_HOST = "localhost";
-    private static final int SERVER_PORT = 3456;
-    private static final int NO_OF_CLIENTS = 15000;
-    private static final List<ProtoSocketChannel> CLIENT_CHANNELS = new ArrayList<>(NO_OF_CLIENTS);
+    private static final int NO_OF_CLIENTS = 15_000;
+    private static final int CONNECT_BATCH = 500;
 
-    private static final MessageFactory messageFactory = new MessageFactory();
-    private static long heartBeatResponseReceived = 0;
+    public static void main(String[] args) throws Exception {
+        CountDownLatch responses = new CountDownLatch(NO_OF_CLIENTS);
+        // One listener for every client: callbacks for different clients run concurrently, so it must be thread-safe
+        ProtoClientListener listener = ProtoClientListener.builder()
+                .onMessage(HeartBeat.HeartBeatResponse.class, (client, response) -> responses.countDown())
+                .onSendFailure((client, message, cause) -> LOGGER.error("{} couldn't send: {}", client, cause.reason()))
+                .build();
+        ProtoClient.Builder builder = ProtoClient.builder("localhost", SampleServer.PORT).listener(listener);
 
-    private static final ExecutorService readExecutor = Executors.newSingleThreadExecutor();
-    private static final ExecutorService writeExecutor = Executors.newSingleThreadExecutor();
+        List<ProtoClient> clients = new ArrayList<>(NO_OF_CLIENTS);
+        long start = System.nanoTime();
+        try {
+            // Connect in batches, so that the server's accept backlog (1024 by default) doesn't overflow
+            List<CompletableFuture<Void>> batch = new ArrayList<>(CONNECT_BATCH);
+            for (int i = 0; i < NO_OF_CLIENTS; i++) {
+                ProtoClient client = builder.build();
+                clients.add(client);
+                batch.add(client.connectAsync());
+                if (batch.size() == CONNECT_BATCH || i == NO_OF_CLIENTS - 1) {
+                    CompletableFuture.allOf(batch.toArray(CompletableFuture[]::new)).join();
+                    batch.clear();
+                }
+            }
+            LOGGER.info("All {} clients are connected ({} ms)", NO_OF_CLIENTS, millisSince(start));
 
-    public static void main(String[] args) {
-        for (int i = 0; i < NO_OF_CLIENTS; i++) {
-            ProtoSocketChannel clientChannel = ProtoChannelFactory
-                    .newClient(SERVER_HOST, SERVER_PORT)
-                    .setReadExecutor(readExecutor)
-                    .setWriteExecutor(writeExecutor)
-                    .build();
-
-            final int clientCount = i;
-            clientChannel.addConnectionHandler(address -> LOGGER.info("Client {} is connected", clientCount));
-            clientChannel.addMessageReceivedHandler(MultiClientsTest::onMessageReceived);
-            CLIENT_CHANNELS.add(clientChannel);
-            clientChannel.connect();
+            start = System.nanoTime();
+            LOGGER.info("Sending a heartbeat request from every client...");
+            for (ProtoClient client : clients) {
+                client.send(MessageFactory.heartBeatRequest(client.id()));
+            }
+            if (responses.await(60, TimeUnit.SECONDS)) {
+                LOGGER.info("All {} responses received ({} ms)", NO_OF_CLIENTS, millisSince(start));
+            } else {
+                LOGGER.error("Only {} of {} responses received", NO_OF_CLIENTS - responses.getCount(), NO_OF_CLIENTS);
+            }
+        } finally {
+            start = System.nanoTime();
+            // close() waits for the peer to close too, so close the clients in parallel
+            try (ExecutorService closer = Executors.newVirtualThreadPerTaskExecutor()) {
+                clients.forEach(client -> closer.execute(client::close));
+            }
+            LOGGER.info("Closed {} clients ({} ms)", clients.size(), millisSince(start));
         }
-        LOGGER.info("All {} clients are connected", NO_OF_CLIENTS);
-
-        LOGGER.info("Sending heartbeat requests from all clients...");
-        HeartBeat.HeartBeatRequest heartBeatRequest = messageFactory.createHeartBeatRequest();
-        CLIENT_CHANNELS.forEach(channel -> channel.sendMessage(heartBeatRequest));
     }
 
-    private static void onMessageReceived(SocketAddress socketAddress, Message message) {
-        if (message instanceof HeartBeat.HeartBeatResponse) {
-            heartBeatResponseReceived++;
-            if (heartBeatResponseReceived == NO_OF_CLIENTS) {
-                LOGGER.info("All HeartBeat response messages have been received. Closing all clients..");
-                CLIENT_CHANNELS.forEach(ProtoSocketChannel::disconnect);
-                readExecutor.shutdown();
-                writeExecutor.shutdown();
-            }
-        } else {
-            LOGGER.warn("Received unknown message from {}:\n{}", socketAddress, message);
-        }
-
+    private static long millisSince(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000;
     }
 
 }

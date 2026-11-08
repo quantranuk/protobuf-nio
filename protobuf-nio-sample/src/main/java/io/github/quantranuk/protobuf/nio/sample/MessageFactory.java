@@ -1,30 +1,26 @@
 package io.github.quantranuk.protobuf.nio.sample;
 
-
+/**
+ * Builds the sample messages. Stateless, so it's safe to call from any connection's thread: in 2.0, handlers for
+ * different connections run concurrently.
+ */
 public final class MessageFactory {
 
-    private final HeartBeat.HeartBeatRequest.Builder heartbeatRequestBuilder;
-    private final HeartBeat.HeartBeatResponse.Builder heartbeatResponseBuilder;
-    private long requestCount = 0;
-    private long responseCount = 0;
-
-    public MessageFactory() {
-        heartbeatRequestBuilder = HeartBeat.HeartBeatRequest.newBuilder();
-        heartbeatResponseBuilder = HeartBeat.HeartBeatResponse.newBuilder();
+    private MessageFactory() {
     }
 
-    public HeartBeat.HeartBeatRequest createHeartBeatRequest() {
-        return heartbeatRequestBuilder
+    public static HeartBeat.HeartBeatRequest heartBeatRequest(long sequence) {
+        return HeartBeat.HeartBeatRequest.newBuilder()
                 .setRequestTimeMillis(System.currentTimeMillis())
-                .setRequestMessage("Ping-" + requestCount++)
+                .setRequestMessage("Ping-" + sequence)
                 .build();
     }
 
-    public HeartBeat.HeartBeatResponse createHeartBeatResponse(long heartBeatRequestRequestTimeMillis) {
-        return heartbeatResponseBuilder
-                .setRequestTimeMillis(heartBeatRequestRequestTimeMillis)
+    public static HeartBeat.HeartBeatResponse heartBeatResponse(HeartBeat.HeartBeatRequest request) {
+        return HeartBeat.HeartBeatResponse.newBuilder()
+                .setRequestTimeMillis(request.getRequestTimeMillis())
                 .setResponseTimeMillis(System.currentTimeMillis())
-                .setResponseMessage("Pong-" + responseCount++)
+                .setResponseMessage("Pong")
                 .build();
     }
 

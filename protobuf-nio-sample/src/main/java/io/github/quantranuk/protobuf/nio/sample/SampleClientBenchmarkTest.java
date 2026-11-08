@@ -1,82 +1,62 @@
 package io.github.quantranuk.protobuf.nio.sample;
 
-import io.github.quantranuk.protobuf.nio.ProtoChannelFactory;
-import io.github.quantranuk.protobuf.nio.ProtoSocketChannel;
-import com.google.protobuf.Message;
+import io.github.quantranuk.protobuf.nio.ProtoClient;
+import io.github.quantranuk.protobuf.nio.ProtoClientListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.net.SocketAddress;
 import java.util.concurrent.CountDownLatch;
 
+/**
+ * Pipelined request/response throughput over one connection to {@link SampleServer}: each round sends 1,000,000
+ * {@code HeartBeatRequest}s without waiting, then waits for all 1,000,000 responses.
+ */
 public class SampleClientBenchmarkTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(SampleClientBenchmarkTest.class);
 
-    private static final String SERVER_HOST = "localhost";
-    private static final int SERVER_PORT = 3456;
-    private static final int WARM_UP = 200;
-    private static final int BENCHMARK_ITERATIONS = 1_000_000;
-    private static final CountDownLatch WARM_UP_LATCH = new CountDownLatch(1);
+    private static final int WARM_UP = 200_000;
+    private static final int MESSAGES_PER_ROUND = 1_000_000;
+    private static final int ROUNDS = 10;
 
-    private static MessageFactory messageFactory;
-    private static ProtoSocketChannel clientChannel;
-    private static int heartBeatResponseReceived = 0;
-    private static long benchmarkStartTime = 0;
+    // Written by the main thread before each round, read by the client's reader thread
+    private static volatile CountDownLatch roundDone;
+    private static volatile long expectedResponses;
+    // Reader thread only: onMessage calls for one connection never overlap
+    private static long responses;
 
-    public static void main(String[] args) {
-        messageFactory = new MessageFactory();
-        clientChannel = ProtoChannelFactory.newClient(SERVER_HOST, SERVER_PORT).build();
-        clientChannel.addMessageReceivedHandler(SampleClientBenchmarkTest::onMsgReceived);
-        clientChannel.addMessageSendFailureHandler(SampleClientBenchmarkTest::onMsgSendFailure);
-        clientChannel.connect();
-        startBenchmark();
-    }
+    public static void main(String[] args) throws Exception {
+        ProtoClientListener listener = ProtoClientListener.builder()
+                .onMessage(HeartBeat.HeartBeatResponse.class, (client, response) -> {
+                    if (++responses == expectedResponses) {
+                        roundDone.countDown();
+                    }
+                })
+                .onSendFailure((client, message, cause) -> LOGGER.error("Couldn't send a message: {}", cause.reason()))
+                .build();
 
-    private static void startBenchmark() {
-        warmUp();
-        benchmarkStartTime = System.currentTimeMillis();
-        for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
-            clientChannel.sendMessage(messageFactory.createHeartBeatRequest());
-        }
-    }
-
-    private static void warmUp() {
-        for (int i = 0; i < WARM_UP; i++) {
-            clientChannel.sendMessage(messageFactory.createHeartBeatRequest());
-        }
-        try {
-            WARM_UP_LATCH.await();
-        } catch (InterruptedException e) {
-            throw new IllegalStateException("Unexpected interruption while waiting for warming up");
-        }
-    }
-
-    private static void onMsgReceived(SocketAddress socketAddress, Message message) {
-        if (!(message instanceof HeartBeat.HeartBeatResponse)) {
-            LOGGER.warn("Received unknown message from {}:\n{}", socketAddress, message);
-            return;
-        }
-
-        heartBeatResponseReceived++;
-        if (heartBeatResponseReceived >= WARM_UP) {
-            if (heartBeatResponseReceived == WARM_UP) {
-                WARM_UP_LATCH.countDown();
-            } else if (heartBeatResponseReceived == WARM_UP + BENCHMARK_ITERATIONS) {
-                long benchmarkEndTime = System.currentTimeMillis();
-                BigDecimal benchmarkIterationBd = BigDecimal.valueOf(BENCHMARK_ITERATIONS);
-                BigDecimal totalMillis = BigDecimal.valueOf(benchmarkEndTime - benchmarkStartTime);
-                LOGGER.info("Sending and receiving {} message took {} milliseconds", BENCHMARK_ITERATIONS, totalMillis);
-                LOGGER.info("Average throughput: {} messages per millisecond (round-trip)", benchmarkIterationBd.divide(totalMillis, 2, RoundingMode.HALF_UP));
-                clientChannel.disconnect();
+        try (ProtoClient client = ProtoClient.builder("localhost", SampleServer.PORT).listener(listener).build()) {
+            client.connect();
+            run(client, WARM_UP);
+            LOGGER.info("Warmed up with {} round trips", WARM_UP);
+            for (int round = 1; round <= ROUNDS; round++) {
+                long nanos = run(client, MESSAGES_PER_ROUND);
+                LOGGER.info("Round {}: {} round trips in {} ms, {} round trips per millisecond", round,
+                        MESSAGES_PER_ROUND, nanos / 1_000_000, Math.round(MESSAGES_PER_ROUND * 1e6 / nanos));
             }
         }
     }
 
-    private static void onMsgSendFailure(SocketAddress socketAddress, Message message, Throwable t) {
-        LOGGER.error("An error has occurred while sending msg {} to {}", message.getClass().getName(), socketAddress, t);
+    private static long run(ProtoClient client, int messages) throws InterruptedException {
+        roundDone = new CountDownLatch(1);
+        expectedResponses += messages;
+        long start = System.nanoTime();
+        for (int i = 0; i < messages; i++) {
+            // Under the default OverflowPolicy.BLOCK, send waits for room when the queue is full
+            client.send(MessageFactory.heartBeatRequest(i));
+        }
+        roundDone.await();
+        return System.nanoTime() - start;
     }
 
 }
