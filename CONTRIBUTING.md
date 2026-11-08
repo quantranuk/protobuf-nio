@@ -51,6 +51,8 @@ CI (GitHub Actions) runs `./mvnw -B verify javadoc:javadoc` on every push and pu
 
 ## Making a change
 
+[AGENTS.md](AGENTS.md) describes the architecture, the conventions and the reasons behind them in detail. It's written for coding agents, and it's the best map of the code for people too.
+
 1. Fork the repository and create a branch.
 2. Make the change, with a test that fails without it where that's practical.
 3. Run `./mvnw clean install` (and the two-CPU run above if you touched the connection code).
