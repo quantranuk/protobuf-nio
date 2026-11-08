@@ -403,6 +403,10 @@ So:
 
 Use the Maven Wrapper (`./mvnw`). Building requires JDK 25 or later.
 
+## Contributing
+
+Bug reports, fixes and improvements are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Please report security vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
+
 ## License
 
 [MIT](LICENSE)

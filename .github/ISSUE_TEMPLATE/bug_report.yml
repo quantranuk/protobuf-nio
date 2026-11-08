@@ -1,0 +1,53 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. **For a security vulnerability, don't open an issue**: see [SECURITY.md](https://github.com/quantranuk/protobuf-nio/blob/master/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: A small program or test that shows the problem is the most helpful. Include the builder settings you use.
+      render: java
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and stack traces
+      description: Including the `DisconnectReason` and cause passed to `onDisconnected`, if relevant.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: protobuf-nio version
+      placeholder: e.g. 2.0.0
+    validations:
+      required: true
+  - type: input
+    id: java
+    attributes:
+      label: Java version
+      description: Output of `java -version`
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. Ubuntu 24.04, Windows 11, macOS 15
+  - type: input
+    id: protobuf
+    attributes:
+      label: protobuf-java version
+      description: If your project sets its own.
