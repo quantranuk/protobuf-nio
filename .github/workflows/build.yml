@@ -18,3 +18,21 @@ jobs:
           cache: maven
       - name: Build, test and check Javadoc
         run: ./mvnw -B verify javadoc:javadoc
+      # Job logs need a login to read, but annotations are public: report each failed test as one, with its message and
+      # where it failed, so a failure on CI's small runners can be diagnosed
+      - name: Report failed tests
+        if: failure()
+        shell: python3 {0}
+        run: |
+          import glob, xml.etree.ElementTree as ET
+          def escape(text):
+              return text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          def escape_property(text):
+              return escape(text).replace(':', '%3A').replace(',', '%2C')
+          for report in glob.glob('**/target/surefire-reports/TEST-*.xml', recursive=True):
+              for case in ET.parse(report).getroot().iter('testcase'):
+                  for problem in list(case.findall('failure')) + list(case.findall('error')):
+                      title = f"{case.get('classname')}#{case.get('name')}"
+                      trace = '\n'.join((problem.text or '').strip().splitlines()[:25])
+                      message = (problem.get('message') or '')[:1000] + '\n' + trace
+                      print('::error title=' + escape_property(title) + '::' + escape(message))
