@@ -158,7 +158,7 @@ Whenever `send` returns `false` because the queue is full, `onSendFailure(REJECT
 
 ## Closing
 
-`close()` on a client, a server connection or a server is graceful: it stops accepting sends, lets the writer flush the queue, sends a TCP FIN and waits for the peer's, then closes the socket, all within `closeTimeout` (default 5 s; `Duration.ZERO` closes at once). The peer receives everything that was queued. `close()` blocks until done, except when called from the connection's own threads: from `onMessage` it waits only for the queue to be written, and from `onSendFailure` it returns at once. `ProtoServer.close()` closes all connections in parallel and waits for every `onDisconnected`.
+`close()` on a client, a server connection or a server is graceful: it stops accepting sends, lets the writer flush the queue, sends a TCP FIN and waits for the peer's, then closes the socket, all within `closeTimeout` (default 5 s; `Duration.ZERO` closes at once). The peer receives everything that was queued. `close()` blocks until done, except when called from the connection's own threads: from `onMessage` it waits only for the queue to be written, and from `onSendFailure` it returns at once. `ProtoServer.close()` closes all connections in parallel and waits for every `onDisconnected`. That includes connections still in their handshake: a client counts itself connected as soon as it has the server's preamble and may already be sending, so the server gives the handshake until `closeTimeout` to finish, then closes the connection gracefully like the others.
 
 `awaitClosed()` blocks until the connection (or server) has closed and returns the `DisconnectReason`:
 

@@ -109,8 +109,11 @@ public interface ProtoServer extends AutoCloseable {
 
     /**
      * Stops accepting, closes every connection as {@link ProtoConnection#close()} does (in parallel), and waits until
-     * each has reported {@code onDisconnected}. Called from a connection's own listener, it doesn't wait for that
-     * connection. Idempotent.
+     * each has reported {@code onDisconnected}. A connection still in its handshake isn't cut off: its client counts
+     * itself connected as soon as it has the server's preamble and may already be sending, so the handshake gets until
+     * {@code closeTimeout} to finish, and the connection then opens and closes gracefully like the others (it's
+     * reported, {@code onConnected} included); one that doesn't finish by then is closed without being reported. Called
+     * from a connection's own listener, it doesn't wait for that connection. Idempotent.
      */
     @Override
     void close();

@@ -74,6 +74,11 @@ final class DefaultProtoConnection implements ProtoConnection {
         connection.close();
     }
 
+    /** For the server's close: a connection still in its handshake gets to finish it, then closes gracefully. */
+    void closeForShutdown() {
+        connection.closeAfterHandshake();
+    }
+
     @Override
     public DisconnectReason awaitClosed() throws InterruptedException {
         return connection.awaitClosed();

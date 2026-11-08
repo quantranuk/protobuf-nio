@@ -258,7 +258,7 @@ public final class DefaultProtoServer implements ProtoServer {
         List<Thread> closers = new ArrayList<>(connections.size());
         for (DefaultProtoConnection connection : connections) {
             if (connection != own) {
-                closers.add(Thread.ofVirtual().name("protobuf-nio-close-" + connection.id()).start(connection::close));
+                closers.add(Thread.ofVirtual().name("protobuf-nio-close-" + connection.id()).start(connection::closeForShutdown));
             }
         }
         if (own != null) {

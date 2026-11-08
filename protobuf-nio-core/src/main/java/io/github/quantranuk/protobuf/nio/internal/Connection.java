@@ -33,6 +33,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -127,6 +128,8 @@ public final class Connection {
     private volatile boolean writing;
     private volatile long closeDeadlineNanos;
     private volatile boolean closeDeadlineArmed;
+    // closeAfterHandshake() was called during the handshake: the reader starts a graceful close once it's done
+    private final AtomicBoolean closeRequested = new AtomicBoolean();
 
     // Reader thread only
     private byte[] readBuffer = new byte[IDLE_READ_BUFFER_SIZE];
@@ -390,7 +393,7 @@ public final class Connection {
 
     private boolean acceptingSends() {
         int s = state.get();
-        return s == OPEN || s == HANDSHAKING;
+        return (s == OPEN || s == HANDSHAKING) && !closeRequested.get();
     }
 
     /** Reserves room for one message. @return false if the queue is full */
@@ -545,13 +548,7 @@ public final class Connection {
             terminate(CLOSED_LOCALLY);
             return;
         }
-        if (state.compareAndSet(OPEN, CLOSING)) {
-            termination.compareAndSet(null, CLOSED_LOCALLY);
-            closeDeadlineNanos = System.nanoTime() + config.closeTimeoutNanos;
-            closeDeadlineArmed = true;
-            LockSupport.unpark(writer);
-            wakeBlockedSenders();
-        } else {
+        if (!beginGracefulClose()) {
             while (!closeDeadlineArmed && state.get() == CLOSING) {
                 Thread.onSpinWait();   // another thread is arming the deadline
             }
@@ -566,6 +563,53 @@ public final class Connection {
         if (!awaitUntil(done, closeDeadlineNanos)) {
             terminate(CLOSED_LOCALLY);
         }
+    }
+
+    /**
+     * Like {@link #close()}, except for a connection still in its handshake, which isn't closed at once. Its peer may
+     * already count it as open and be sending: a peer does once it has read this side's preamble, which the writer sends
+     * first. So the handshake gets until the close deadline ({@code closeTimeout} from now) to finish; the connection then
+     * opens as usual ({@code onConnected} included) and closes gracefully within the same deadline, so everything the peer
+     * sent is read. If the handshake hasn't finished by the deadline, the connection is closed then, without listener
+     * calls. A server uses this when it closes. Blocks until the socket is closed or the deadline passes.
+     */
+    public void closeAfterHandshake() {
+        if (config.closeTimeoutNanos == 0 || state.get() != HANDSHAKING) {
+            close();
+            return;
+        }
+        if (closeRequested.compareAndSet(false, true)) {
+            closeDeadlineNanos = System.nanoTime() + config.closeTimeoutNanos;
+            closeDeadlineArmed = true;   // the watchdog closes the connection at the deadline
+        }
+        // The reader checks the request after leaving the handshake; this checks the state after making the request
+        // (both are volatile), so at least one of them sees the other and starts the graceful close
+        if (state.get() == OPEN) {
+            beginGracefulClose();
+        }
+        if (!awaitUntil(socketClosed, closeDeadlineNanos)) {
+            terminate(CLOSED_LOCALLY);
+        }
+    }
+
+    /**
+     * Starts a graceful close of an open connection: stops accepting sends, arms the close deadline unless it's armed
+     * already, and lets the writer flush and send FIN. Doesn't wait. At most one caller wins.
+     *
+     * @return true if this call started it
+     */
+    private boolean beginGracefulClose() {
+        if (!state.compareAndSet(OPEN, CLOSING)) {
+            return false;
+        }
+        termination.compareAndSet(null, CLOSED_LOCALLY);
+        if (!closeDeadlineArmed) {
+            closeDeadlineNanos = System.nanoTime() + config.closeTimeoutNanos;
+            closeDeadlineArmed = true;
+        }
+        LockSupport.unpark(writer);
+        wakeBlockedSenders();
+        return true;
     }
 
     /**
@@ -680,6 +724,9 @@ public final class Connection {
             connected = true;
             handshake.complete(null);
             notifyConnected();
+            if (closeRequested.get()) {
+                beginGracefulClose();   // closeAfterHandshake() came during the handshake; keep reading until the peer's FIN
+            }
             readFrames(in);
             terminate(CLOSED_BY_PEER);
         } catch (SSLException e) {

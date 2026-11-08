@@ -29,6 +29,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -450,6 +451,72 @@ public class ProtoClientServerTest {
             lost.andNot(failed[k]);
             assertTrue(lost.isEmpty(), "Client " + k + ": " + lost.cardinality() + " accepted messages neither received nor reported");
         }
+    }
+
+    @Test
+    public void serverCloseDuringTheServerSideHandshakeLosesNothing() throws Exception {
+        // A client counts as open once it has read the server's preamble, the server only once its reader has read the
+        // client's. Delay that reader so that server.close() comes in between, while the client is already sending.
+        AtomicBoolean delayNextReader = new AtomicBoolean();
+        AtomicInteger received = new AtomicInteger();
+        List<String> events = new CopyOnWriteArrayList<>();
+        ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
+                .threadFactory(task -> Thread.ofVirtual().unstarted(delayNextReader.getAndSet(false) ? () -> {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    task.run();
+                } : task))
+                .listener(ProtoServerListener.builder()
+                        .onConnected(connection -> events.add("connected"))
+                        .onMessage(HeartBeatRequest.class, (connection, message) -> received.incrementAndGet())
+                        .onDisconnected((connection, reason, cause) -> events.add("disconnected " + reason))
+                        .build()));
+        delayNextReader.set(true);   // a connection's reader is the first thread the server creates for it
+        ProtoClient client = client(server, ProtoClientListener.builder());
+        client.connect();
+        int sent = 10_000;
+        for (int i = 0; i < sent; i++) {
+            assertTrue(client.send(request(i)));
+        }
+        assertTrue(server.connections().isEmpty(), "the server should still be in the handshake");
+
+        server.close();
+
+        assertEquals(DisconnectReason.CLOSED_BY_PEER, client.awaitClosed());
+        assertEquals(sent, received.get(), "messages the client sent during the server's handshake were lost");
+        assertEquals(List.of("connected", "disconnected CLOSED_LOCALLY"), events);
+    }
+
+    @Test
+    public void serverCloseGivesAPeerStillInItsHandshakeUntilTheCloseTimeout() throws Exception {
+        AtomicInteger serverCalls = new AtomicInteger();
+        ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
+                .closeTimeout(Duration.ofMillis(300))
+                .listener(new ProtoServerListener() {
+                    @Override
+                    public void onConnected(ProtoConnection connection) {
+                        serverCalls.incrementAndGet();
+                    }
+
+                    @Override
+                    public void onDisconnected(ProtoConnection connection, DisconnectReason reason, Throwable cause) {
+                        serverCalls.incrementAndGet();
+                    }
+                }));
+        Socket silent = track(new Socket(LOOPBACK, server.localAddress().getPort()));   // never sends a preamble
+        silent.setSoTimeout(5000);
+        silent.getInputStream().readNBytes(Protocol.PREAMBLE_LENGTH);   // the server has accepted it
+
+        long start = System.nanoTime();
+        server.close();
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        assertTrue(elapsedMillis >= 250 && elapsedMillis < 3000, "server close() took " + elapsedMillis + " ms");
+        assertClosedByServer(silent);
+        assertEquals(0, serverCalls.get(), "a peer that never finished its handshake was reported");
     }
 
     @Test
