@@ -1,5 +1,6 @@
 package io.github.quantranuk.protobuf.nio;
 
+import java.io.Serial;
 import java.util.Objects;
 
 /**
@@ -23,9 +24,16 @@ public final class SendException extends RuntimeException {
         WRITE_FAILED
     }
 
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    /** Why the message wasn't written. */
     private final Reason reason;
 
     /**
+     * Creates the exception. The library creates these itself; the constructor is public for tests of your own
+     * listeners.
+     *
      * @param reason why the message wasn't written
      * @param cause  the I/O error for {@link Reason#WRITE_FAILED}, otherwise usually {@code null}
      */
@@ -34,7 +42,11 @@ public final class SendException extends RuntimeException {
         this.reason = reason;
     }
 
-    /** @return why the message wasn't written */
+    /**
+     * Tells the failure cases apart.
+     *
+     * @return why the message wasn't written
+     */
     public Reason reason() {
         return reason;
     }

@@ -16,5 +16,5 @@ jobs:
           distribution: temurin
           java-version: 25
           cache: maven
-      - name: Build and test
-        run: ./mvnw -B verify
+      - name: Build, test and check Javadoc
+        run: ./mvnw -B verify javadoc:javadoc

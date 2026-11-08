@@ -19,10 +19,23 @@ import javax.net.ssl.SSLContext;
  * Accepts protobuf-nio connections. Each accepted connection gets its own reader and writer virtual threads, so
  * listener callbacks for different connections run concurrently (see {@link ProtoServerListener}); one more virtual
  * thread accepts connections.
+ * <pre>{@code
+ * ProtoServer server = ProtoServer.builder(3456).listener(listener).build();
+ * server.start();
+ * // ...
+ * server.close();
+ * }</pre>
+ * All methods are thread-safe.
  */
 public interface ProtoServer extends AutoCloseable {
 
-    /** @param port the port to listen on, on every interface; 0 = any free port (see {@link #localAddress()}) */
+    /**
+     * Starts building a server that listens on every interface.
+     *
+     * @param port the port to listen on, or 0 for any free port (see {@link #localAddress()})
+     * @return a new builder
+     * @throws IllegalArgumentException if the port is outside 0&ndash;65535
+     */
     static Builder builder(int port) {
         if (port < 0 || port > 65535) {
             throw new IllegalArgumentException("port must be between 0 and 65535: " + port);
@@ -30,6 +43,12 @@ public interface ProtoServer extends AutoCloseable {
         return new Builder(new InetSocketAddress(port));
     }
 
+    /**
+     * Starts building a server that listens on one address, for example {@code new InetSocketAddress("127.0.0.1", 0)}.
+     *
+     * @param bindAddress the local address and port to bind to
+     * @return a new builder
+     */
     static Builder builder(InetSocketAddress bindAddress) {
         return new Builder(Objects.requireNonNull(bindAddress, "bindAddress"));
     }
@@ -42,25 +61,50 @@ public interface ProtoServer extends AutoCloseable {
      */
     void start() throws IOException;
 
-    /** Bound address (useful with port 0). @throws IllegalStateException before {@code start()} */
+    /**
+     * The address the server is listening on, useful with port 0.
+     *
+     * @return the bound address
+     * @throws IllegalStateException before {@code start()}
+     */
     InetSocketAddress localAddress();
 
-    /** Weakly consistent, unmodifiable view of the open connections. */
+    /**
+     * The open connections: those that have had {@code onConnected} and not yet {@code onDisconnected}.
+     *
+     * @return a weakly consistent, unmodifiable view, which changes as connections open and close
+     */
     Collection<ProtoConnection> connections();
 
     /**
      * Encodes the message once and queues it on every open connection. Never blocks: under
      * {@link OverflowPolicy#BLOCK}, a connection whose queue is full rejects the message as under
-     * {@link OverflowPolicy#REJECT}; {@code DROP_OLDEST} and {@code DISCONNECT} apply as usual. Rejections and drops are
+     * {@link OverflowPolicy#REJECT}; {@code DROP_OLDEST} and {@code DISCONNECT} apply as usual. Rejections and drops
+     * are
      * reported to {@code onSendFailure} on the calling thread.
+     *
+     * @param message the message to send
      * @return the number of connections it was queued on
+     * @throws NullPointerException if {@code message} is null
      */
     int broadcast(MessageLite message);
 
-    /** Same, for the open connections that match the filter (for example subscribers to a topic). */
+    /**
+     * Same as {@link #broadcast(MessageLite)}, for the open connections that match the filter, for example the
+     * subscribers to a topic. The filter runs on the calling thread, once per open connection.
+     *
+     * @param message the message to send
+     * @param filter  selects the connections to send to
+     * @return the number of connections it was queued on
+     * @throws NullPointerException if {@code message} or {@code filter} is null
+     */
     int broadcast(MessageLite message, Predicate<? super ProtoConnection> filter);
 
-    /** @return true after {@code start()}, until {@code close()} */
+    /**
+     * Whether the server is accepting connections.
+     *
+     * @return true after {@code start()}, until {@code close()}
+     */
     boolean isOpen();
 
     /**
@@ -72,12 +116,18 @@ public interface ProtoServer extends AutoCloseable {
     void close();
 
     /**
-     * Blocks until {@code close()} has finished (for example at the end of {@code main()}).
+     * Blocks until {@code close()} has finished, for example at the end of {@code main()}.
+     *
      * @throws IllegalStateException if {@code start()} hasn't been called
+     * @throws InterruptedException  if interrupted while waiting
      */
     void awaitClosed() throws InterruptedException;
 
-    /** Reusable. Invalid values throw {@link IllegalArgumentException} at once. */
+    /**
+     * Configures and builds servers. Reusable: each {@link #build()} makes a new, unstarted server with the current
+     * settings. Invalid values throw {@link IllegalArgumentException} as soon as the setting is called, and
+     * {@code null} arguments throw {@link NullPointerException}. Connection settings apply to each accepted connection.
+     */
     final class Builder {
         private final InetSocketAddress bindAddress;
         private final ConnectionConfig.Builder config = ConnectionConfig.builder().socketOption(StandardSocketOptions.SO_REUSEADDR, true);
@@ -89,7 +139,12 @@ public interface ProtoServer extends AutoCloseable {
             this.bindAddress = bindAddress;
         }
 
-        /** Default: a no-op listener. */
+        /**
+         * Sets the listener that receives the events of every connection. Default: a no-op listener.
+         *
+         * @param listener receives the events of the connections
+         * @return this builder
+         */
         public Builder listener(ProtoServerListener listener) {
             this.listener = Objects.requireNonNull(listener, "listener");
             return this;
@@ -99,6 +154,10 @@ public interface ProtoServer extends AutoCloseable {
          * Optional low-garbage path: messages of this type skip parsing and go to {@code handler} with their raw
          * bytes, instead of the listener's {@code onMessage}. The type is always accepted, even when
          * {@link #allowedMessageTypes} doesn't list it.
+         *
+         * @param type the generated message class
+         * @param handler receives the payload of each message of that type
+         * @return this builder
          * @throws IllegalArgumentException if the type already has a raw handler, or isn't a generated protobuf message
          *                                  class
          */
@@ -107,7 +166,12 @@ public interface ProtoServer extends AutoCloseable {
             return this;
         }
 
-        /** Pending connections the operating system may queue. Default 1024. */
+        /**
+         * Pending connections the operating system may queue. Default 1024.
+         *
+         * @param backlog the queue length; must be positive
+         * @return this builder
+         */
         public Builder backlog(int backlog) {
             if (backlog < 1) {
                 throw new IllegalArgumentException("backlog must be positive: " + backlog);
@@ -116,7 +180,12 @@ public interface ProtoServer extends AutoCloseable {
             return this;
         }
 
-        /** Connections beyond this are closed as soon as they're accepted. Default: unlimited. */
+        /**
+         * Connections beyond this are closed as soon as they're accepted. Default: unlimited.
+         *
+         * @param max the limit; must be positive
+         * @return this builder
+         */
         public Builder maxConnections(int max) {
             if (max < 1) {
                 throw new IllegalArgumentException("maxConnections must be positive: " + max);
@@ -125,49 +194,90 @@ public interface ProtoServer extends AutoCloseable {
             return this;
         }
 
-        /** Protocol preamble (and TLS handshake, when configured). Default 10 s. */
+        /**
+         * Timeout of each connection's protocol preamble (and TLS handshake, when configured). Default 10 s.
+         *
+         * @param timeout the timeout; must be positive
+         * @return this builder
+         */
         public Builder handshakeTimeout(Duration timeout) {
             config.handshakeTimeout(timeout);
             return this;
         }
 
-        /** Close a connection if nothing is received for this long; any frame, heartbeats included, resets it. Default: none. */
+        /**
+         * Close a connection if nothing is received for this long; any frame, heartbeats included, resets it. Default:
+         * none.
+         *
+         * @param timeout the timeout, or {@link Duration#ZERO} for none
+         * @return this builder
+         */
         public Builder readTimeout(Duration timeout) {
             config.readTimeout(timeout);
             return this;
         }
 
-        /** Send a heartbeat frame when nothing has been sent for this long. Default: none. */
+        /**
+         * Send a heartbeat frame when nothing has been sent for this long. Default: none.
+         *
+         * @param interval the interval, or {@link Duration#ZERO} for no heartbeats
+         * @return this builder
+         */
         public Builder heartbeatInterval(Duration interval) {
             config.heartbeatInterval(interval);
             return this;
         }
 
-        /** Close a connection if a socket write blocks for longer than this. Default 10 s. */
+        /**
+         * Close a connection if a socket write blocks for longer than this. Default 10 s.
+         *
+         * @param timeout the timeout, or {@link Duration#ZERO} for none
+         * @return this builder
+         */
         public Builder writeTimeout(Duration timeout) {
             config.writeTimeout(timeout);
             return this;
         }
 
-        /** How long closing a connection may spend writing queued messages. Default 5 s; {@link Duration#ZERO} = at once. */
+        /**
+         * How long closing a connection may spend writing queued messages. Default 5 s.
+         *
+         * @param timeout the timeout, or {@link Duration#ZERO} to close at once without flushing
+         * @return this builder
+         */
         public Builder closeTimeout(Duration timeout) {
             config.closeTimeout(timeout);
             return this;
         }
 
-        /** Largest socket read per connection. Default 64 KB. */
+        /**
+         * Largest socket read per connection. Default 64 KB.
+         *
+         * @param bytes the size, at least 256
+         * @return this builder
+         */
         public Builder readBufferSize(int bytes) {
             config.readBufferSize(bytes);
             return this;
         }
 
-        /** Largest batch written in one go per connection. Default 64 KB. */
+        /**
+         * Largest batch written in one go per connection. Default 64 KB.
+         *
+         * @param bytes the size, at least 256
+         * @return this builder
+         */
         public Builder writeBufferSize(int bytes) {
             config.writeBufferSize(bytes);
             return this;
         }
 
-        /** Largest protobuf payload accepted from a client. Default 64 MiB. */
+        /**
+         * Largest protobuf payload accepted from a client. Default 64 MiB.
+         *
+         * @param bytes the size, from 0 up to about 2 GiB
+         * @return this builder
+         */
         public Builder maxMessageSize(int bytes) {
             config.maxMessageSize(bytes);
             return this;
@@ -176,25 +286,44 @@ public interface ProtoServer extends AutoCloseable {
         /**
          * Most encoded bytes queued and not yet written, per connection. A single larger message is queued only when
          * nothing else is pending. Default 64 MiB.
+         *
+         * @param bytes the limit; must be positive
+         * @return this builder
          */
         public Builder maxPendingBytes(long bytes) {
             config.maxPendingBytes(bytes);
             return this;
         }
 
-        /** Most messages queued and not yet written, per connection. Default 1,000,000. */
+        /**
+         * Most messages queued and not yet written, per connection. Default 1,000,000.
+         *
+         * @param messages the limit; must be positive
+         * @return this builder
+         */
         public Builder maxPendingMessages(int messages) {
             config.maxPendingMessages(messages);
             return this;
         }
 
-        /** What {@link ProtoConnection#send} does when a connection's queue is full. Default {@link OverflowPolicy#BLOCK}. */
+        /**
+         * What {@link ProtoConnection#send} does when a connection's queue is full. Default {@link
+         * OverflowPolicy#BLOCK}.
+         *
+         * @param policy the policy
+         * @return this builder
+         */
         public Builder overflowPolicy(OverflowPolicy policy) {
             config.overflowPolicy(policy);
             return this;
         }
 
-        /** How long {@link OverflowPolicy#BLOCK} waits for room. {@link Duration#ZERO} = not at all. Default 10 s. */
+        /**
+         * How long {@link OverflowPolicy#BLOCK} waits for room. Default 10 s.
+         *
+         * @param timeout the timeout, or {@link Duration#ZERO} to give up at once
+         * @return this builder
+         */
         public Builder sendTimeout(Duration timeout) {
             config.sendTimeout(timeout);
             return this;
@@ -203,6 +332,11 @@ public interface ProtoServer extends AutoCloseable {
         /**
          * A socket option, applied to the listening socket and to accepted connections, where supported (others are
          * ignored). Default: {@code TCP_NODELAY} and {@code SO_REUSEADDR} on.
+         *
+         * @param option the option, for example {@link java.net.StandardSocketOptions#SO_SNDBUF}
+         * @param value its value
+         * @param <T> the type of the option's value
+         * @return this builder
          */
         public <T> Builder socketOption(SocketOption<T> option, T value) {
             config.socketOption(option, value);
@@ -211,8 +345,13 @@ public interface ProtoServer extends AutoCloseable {
 
         /**
          * Accepts only these message types from the peer, which is disconnected with
-         * {@link DisconnectReason#PROTOCOL_ERROR} if it sends any other; the class of a disallowed type is never loaded.
-         * Use it when the peer isn't trusted. Replaces the previous list. Default: any protobuf class on the class path.
+         * {@link DisconnectReason#PROTOCOL_ERROR} if it sends any other; the class of a disallowed type is never
+         * loaded.
+         * Use it when the peer isn't trusted. Replaces the previous list. Default: any protobuf class on the class
+         * path.
+         *
+         * @param types the generated message classes to accept
+         * @return this builder
          * @throws IllegalArgumentException if no type is given, or a type isn't a generated protobuf message class
          */
         @SafeVarargs
@@ -221,13 +360,23 @@ public interface ProtoServer extends AutoCloseable {
             return this;
         }
 
-        /** Loads received message classes. Default: the thread's context class loader when {@link #build()} runs. */
+        /**
+         * Loads received message classes. Default: the thread's context class loader when {@link #build()} runs.
+         *
+         * @param loader the class loader
+         * @return this builder
+         */
         public Builder classLoader(ClassLoader loader) {
             config.classLoader(Objects.requireNonNull(loader, "loader"));
             return this;
         }
 
-        /** Creates the acceptor thread and each connection's reader and writer threads. Default: virtual threads. */
+        /**
+         * Creates the acceptor thread and each connection's reader and writer threads. Default: virtual threads.
+         *
+         * @param factory the thread factory
+         * @return this builder
+         */
         public Builder threadFactory(ThreadFactory factory) {
             config.threadFactory(Objects.requireNonNull(factory, "factory"));
             return this;
@@ -238,18 +387,31 @@ public interface ProtoServer extends AutoCloseable {
          * for client certificates, see {@link #tlsClientAuth}). Each connection's TLS handshake runs on its own thread
          * within {@code handshakeTimeout}; a connection whose handshake fails is never reported to the listener.
          * Default: no TLS.
+         *
+         * @param context provides the protocols, cipher suites, certificate and trust material
+         * @return this builder
          */
         public Builder tls(SSLContext context) {
             config.tls(Objects.requireNonNull(context, "context"));
             return this;
         }
 
-        /** With TLS, whether clients must present a trusted certificate. Default {@link TlsClientAuth#NONE}. */
+        /**
+         * With TLS, whether clients must present a trusted certificate. Default {@link TlsClientAuth#NONE}.
+         *
+         * @param mode whether to ask for client certificates
+         * @return this builder
+         */
         public Builder tlsClientAuth(TlsClientAuth mode) {
             config.tlsClientAuth(mode);
             return this;
         }
 
+        /**
+         * Builds a server with the current settings. Call {@link ProtoServer#start()} on it to bind.
+         *
+         * @return a new, unstarted server
+         */
         public ProtoServer build() {
             return new DefaultProtoServer(bindAddress, backlog, maxConnections, config.build(), listener);
         }

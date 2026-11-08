@@ -19,7 +19,9 @@ Maven multi-module project compiled for Java 25 (`maven.compiler.release=25`). J
 ./mvnw test -pl protobuf-nio-core -Dtest=ProtobufSerializerTest#testName   # single method
 ```
 
-All dependency and plugin versions live as properties in the root `pom.xml` (`dependencyManagement` with the JUnit and Log4j BOMs, plus `pluginManagement`). Modules declare dependencies without versions. Tests use JUnit Jupiter (JUnit 6), run by surefire 3.x. CI is GitHub Actions (`.github/workflows/build.yml`): it builds and tests with Temurin 25 by running `./mvnw -B verify`.
+All dependency and plugin versions live as properties in the root `pom.xml` (`dependencyManagement` with the JUnit and Log4j BOMs, plus `pluginManagement`). Modules declare dependencies without versions. Tests use JUnit Jupiter (JUnit 6), run by surefire 3.x. CI is GitHub Actions (`.github/workflows/build.yml`): it builds, tests and checks the Javadoc with Temurin 25 by running `./mvnw -B verify javadoc:javadoc`.
+
+**Javadoc is enforced:** `maven-javadoc-plugin` runs with `doclint=all` and `failOnWarnings`, so every public element of the API package needs a comment, plus `@param`, `@return` and `@throws` (builder settings included: `@return this builder`). Check with `./mvnw -pl protobuf-nio-core javadoc:javadoc`. The `internal` package isn't documented (not exported), and the sample module skips Javadoc (`maven.javadoc.skip`). The package overview is in `package-info.java`.
 
 Protobuf code is generated at build time by `io.github.ascopes:protobuf-maven-plugin`, with the `protoc` version tied to `${protobuf.version}`:
 - core: `src/test/proto/TestHeartBeat.proto` → test classes (`generate-test`)
