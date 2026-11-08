@@ -73,16 +73,31 @@ By contributing, you agree that your contributions are licensed under the projec
 
 ## Releasing
 
-For maintainers. Releases go to Maven Central with the `release` profile, which builds sources and Javadoc jars, signs
-every artifact with GPG and uploads them to the [Central Portal](https://central.sonatype.com):
+For maintainers. Releases go to Maven Central through the [Release workflow](.github/workflows/release.yml), which
+builds, runs the tests, builds sources and Javadoc jars, signs every artifact and uploads them to the
+[Central Portal](https://central.sonatype.com). It uses four repository secrets: `CENTRAL_TOKEN_USERNAME` and
+`CENTRAL_TOKEN_PASSWORD` (a Portal user token), `MAVEN_GPG_KEY` (the ASCII-armored secret signing key) and
+`MAVEN_GPG_PASSPHRASE`.
 
-1. Make sure `master` is green and `CHANGELOG.md`'s `## [Unreleased]` section describes the release.
-2. Set the release version (no `-SNAPSHOT`) in the three `pom.xml` files, rename `## [Unreleased]` to
-   `## [X.Y.Z] - YYYY-MM-DD` (and its link at the bottom to the `vX.Y.Z` tag), and commit.
-3. Run `./mvnw -P release clean deploy`. It needs a `central` server in `~/.m2/settings.xml` with a Portal user token,
-   and the signing key in the local `gpg`. To see what would be published without uploading anything, add
-   `-Dcentral.skipUpload=true` and look at `target/central-publishing/central-bundle.zip`.
-4. On the Central Portal, check the validated deployment and click **Publish**. It can take a while to appear on Maven
-   Central.
-5. Tag the release commit `vX.Y.Z`, push it, and create a GitHub release with the changelog section as its notes.
-6. Set the next development version (`X.Y.(Z+1)-SNAPSHOT`), add a new empty `## [Unreleased]` section, and commit.
+1. **Dry run.** On the repository's Actions tab, open **Release** and click **Run workflow** on `master`. It does the
+   whole release for the current version without `-SNAPSHOT`, except the upload: the bundle that would be published
+   and the release notes are kept as an artifact of the run. This checks the secrets and the signing too.
+2. **Release commit.** Set the release version (no `-SNAPSHOT`) in the three `pom.xml` files, rename
+   `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD` (and point its link at the bottom to
+   `https://github.com/quantranuk/protobuf-nio/releases/tag/vX.Y.Z`), then commit and push.
+3. **Tag.** `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow checks that the tag matches the POM version and
+   that `CHANGELOG.md` has a `## [X.Y.Z]` section, then uploads and creates the GitHub release with that section as its
+   notes.
+4. **Publish.** On the Central Portal, under **Deployments**, check the validated deployment and click **Publish**. It
+   can take a while to appear on Maven Central. A published version can never be changed or removed: a mistake needs a
+   new version.
+5. **Next version.** Set `X.Y.(Z+1)-SNAPSHOT` in the three `pom.xml` files, add a new empty `## [Unreleased]` section
+   (with its link to `https://github.com/quantranuk/protobuf-nio/compare/vX.Y.Z...master`), then commit and push.
+
+If the workflow fails before uploading, fix the problem, move the tag to the fixed commit
+(`git tag -f vX.Y.Z && git push -f origin vX.Y.Z`) and it runs again. If it fails after uploading, drop the deployment
+on the Portal first.
+
+To release from your own machine instead, run `./mvnw -P release clean deploy` from the release commit. It needs a
+`central` server in `~/.m2/settings.xml` with the Portal token, and the signing key in your local `gpg`;
+`-Dcentral.skipUpload=true` stops after building `target/central-publishing/central-bundle.zip`.

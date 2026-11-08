@@ -1,0 +1,101 @@
+name: Release
+
+# Pushing a tag vX.Y.Z releases version X.Y.Z: the POMs must already say X.Y.Z (no -SNAPSHOT) and CHANGELOG.md must
+# have a "## [X.Y.Z]" section. The deployment then waits on the Central Portal for a manual "Publish".
+# "Run workflow" (manual) is a dry run: the same build, tests and signing for the current version without -SNAPSHOT,
+# with the bundle kept as a workflow artifact instead of being uploaded. See CONTRIBUTING.md.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: ${{ github.event_name == 'push' && format('Release {0}', github.ref_name) || 'Dry run' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to create the GitHub release
+    env:
+      DRY_RUN: ${{ github.event_name != 'push' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+          # Writes a settings.xml with a "central" server whose credentials come from these environment variables
+          server-id: central
+          server-username: CENTRAL_TOKEN_USERNAME
+          server-password: CENTRAL_TOKEN_PASSWORD
+
+      - name: Determine the version
+        run: |
+          pom_version=$(./mvnw -q -B org.apache.maven.plugins:maven-help-plugin:3.5.2:evaluate -Dexpression=project.version -DforceStdout)
+          if [ "$DRY_RUN" = true ]; then
+            version=${pom_version%-SNAPSHOT}
+            # Release version on the runner only, as a release commit would have it
+            for pom in pom.xml protobuf-nio-core/pom.xml protobuf-nio-sample/pom.xml; do
+              sed -i "s#<version>${pom_version}</version>#<version>${version}</version>#" "$pom"
+            done
+            section=Unreleased
+          else
+            version=${GITHUB_REF_NAME#v}
+            if [ "$pom_version" != "$version" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} doesn't match the version in pom.xml (${pom_version}). Commit the release version, then tag that commit."
+              exit 1
+            fi
+            section=$version
+          fi
+          case "$version" in
+            *-SNAPSHOT) echo "::error::Can't release a -SNAPSHOT version: ${version}"; exit 1 ;;
+          esac
+          echo "Releasing ${version} (dry run: ${DRY_RUN})"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "SECTION=${section}" >> "$GITHUB_ENV"
+
+      - name: Extract the release notes from CHANGELOG.md
+        run: |
+          # The lines between "## [<section>]" and the next "## [" heading (or the link definitions at the end)
+          awk -v heading="## [${SECTION}]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && (/^## \[/ || /^\[[^]]+\]: /) { exit }
+            found { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no \"## [${SECTION}]\" section, or it's empty."
+            exit 1
+          fi
+          cat release-notes.md
+
+      - name: Build, test, sign and upload to the Central Portal
+        env:
+          CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          CENTRAL_TOKEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          MAVEN_GPG_KEY: ${{ secrets.MAVEN_GPG_KEY }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        # -Dgpg.signer=bc: sign with the key in MAVEN_GPG_KEY, without a gpg installation
+        run: ./mvnw -B -P release clean deploy -Dgpg.signer=bc -Dcentral.skipUpload=${DRY_RUN}
+
+      - name: Keep the bundle (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: central-bundle-${{ env.VERSION }}
+          path: |
+            target/central-publishing/central-bundle.zip
+            release-notes.md
+
+      - name: Create the GitHub release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$VERSION" --notes-file release-notes.md
