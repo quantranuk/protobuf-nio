@@ -1,4 +1,6 @@
 [![Build](https://github.com/quantranuk/protobuf-nio/actions/workflows/build.yml/badge.svg)](https://github.com/quantranuk/protobuf-nio/actions/workflows/build.yml)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.quantranuk/protobuf-nio-core.svg)](https://central.sonatype.com/artifact/io.github.quantranuk/protobuf-nio-core)
+[![javadoc](https://javadoc.io/badge2/io.github.quantranuk/protobuf-nio-core/javadoc.svg)](https://javadoc.io/doc/io.github.quantranuk/protobuf-nio-core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Java 25+](https://img.shields.io/badge/Java-25%2B-blue.svg)](https://openjdk.org/projects/jdk/25/)
 

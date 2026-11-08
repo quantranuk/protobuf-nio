@@ -6,7 +6,7 @@ Guidance for coding agents (Claude Code, Codex, Cursor, GitHub Copilot and other
 
 Java library for sending and receiving protobuf messages over TCP with no netty/mina dependency.
 
-**Status: 2.0, feature-complete, not yet released to Maven Central** (version `2.0.0-SNAPSHOT`). 2.0 is a rewrite on virtual threads with blocking sockets, a new API (`ProtoClient` / `ProtoServer` / `ProtoConnection`), TLS, backpressure and a one-time protocol preamble. The frame format is unchanged. There's no backward compatibility with 1.x, which had no users. 1.x (async NIO, `java.nio.channels.Asynchronous*`, no TLS) is gone from `master`; its last version is the git tag `1.x-final`, the reference for 1.x behaviour, its tests (`ChannelRobustnessTest`) and its benchmark baseline. The README documents the 2.0 API for users and must stay in step with it (configuration table, defaults, threading contract).
+**Status: 2.0.0 is released on Maven Central** (tag `v2.0.0`); `master` is `2.0.1-SNAPSHOT` (2.0.x fixes). The next major version (3.x) will be a separate, renamed project, not this repository. 2.0 is a rewrite on virtual threads with blocking sockets, a new API (`ProtoClient` / `ProtoServer` / `ProtoConnection`), TLS, backpressure and a one-time protocol preamble. The frame format is unchanged. There's no backward compatibility with 1.x, which had no users. 1.x (async NIO, `java.nio.channels.Asynchronous*`, no TLS) is gone from `master`; its last version is the git tag `1.x-final`, the reference for 1.x behaviour, its tests (`ChannelRobustnessTest`) and its benchmark baseline. The README documents the 2.0 API for users and must stay in step with it (configuration table, defaults, threading contract).
 
 ## Build & test
 
