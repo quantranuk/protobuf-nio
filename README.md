@@ -11,7 +11,7 @@ A small Java library for sending and receiving [Protocol Buffers](https://protob
 - **TLS**, timeouts, heartbeats, graceful close, connection limits, an allowlist of accepted message types for untrusted peers.
 - **Fast and lean:** about 7 million pipelined request/response round trips per second on one connection, and about 7 KB of heap per idle connection (see [Performance](#performance)). Sending allocates nothing per message beyond a queue node.
 
-> **Limitations:** both peers must be Java and have the same generated protobuf classes on their classpath (see [Wire format](#wire-format)). 2.x doesn't talk to 1.x.
+> **Limitations:** both peers must be Java and have the same generated protobuf classes on their classpath (see [Wire format](#wire-format)).
 
 ## Requirements
 
@@ -103,7 +103,7 @@ while (running) {
 }
 ```
 
-A `java.net.ProtocolException` from `connect()` means the peer isn't a protobuf-nio 2.x endpoint, so retrying won't help.
+A `java.net.ProtocolException` from `connect()` means the peer isn't a protobuf-nio endpoint, or has no protocol version in common with this side, so retrying won't help.
 
 ### Samples
 
@@ -170,7 +170,7 @@ Whenever `send` returns `false` because the queue is full, `onSendFailure(REJECT
 | `WRITE_TIMEOUT` | A socket write blocked for longer than `writeTimeout`, usually because the peer stopped reading. |
 | `SEND_QUEUE_OVERFLOW` | The queue was full under `OverflowPolicy.DISCONNECT`. |
 | `PROTOCOL_ERROR` | The peer sent a bad frame, a disallowed or unknown class name, or a payload that didn't parse. |
-| `PROTOCOL_MISMATCH` | The peer's protocol preamble was missing or wrong (for example a 1.x peer, or not protobuf-nio at all). |
+| `PROTOCOL_MISMATCH` | The peer's protocol preamble was missing or wrong (the peer isn't protobuf-nio), or the two sides have no protocol version in common. |
 | `TLS_ERROR` | A TLS failure after connecting. |
 | `IO_ERROR` | Any other socket error. |
 
@@ -316,7 +316,7 @@ Right after connecting (and after the TLS handshake), each side sends an 8-byte 
 | Version | 2 bytes | Highest protocol version the sender supports (currently 1) |
 | Flags | 2 bytes | Reserved: sent as 0, ignored on receipt |
 
-Each side may send frames straight after its own preamble, without waiting for the peer's. Both sides then use the lower of the two versions. The connection is closed with `PROTOCOL_MISMATCH` if the magic is wrong (for example, a 1.x peer, which starts with a frame), if the two sides have no version in common, or if no preamble arrives within the handshake timeout.
+Each side may send frames straight after its own preamble, without waiting for the peer's. Both sides then use the lower of the two versions. The connection is closed with `PROTOCOL_MISMATCH` if the magic is wrong, if the two sides have no version in common, or if no preamble arrives within the handshake timeout.
 
 ### Frames
 
@@ -338,8 +338,6 @@ The receiver uses the class name to find the generated class and its parser, so:
 - **renaming or moving** a message's Java class or package breaks compatibility with peers that still use the old name;
 - peers must be Java: other languages can implement the format, but they must send Java class names.
 
-The frame format is the same as 1.x; the preamble and heartbeats are new in 2.0.
-
 ## Performance
 
 `SampleClientBenchmarkTest` sends 1,000,000 heartbeat requests to `SampleServer` over one connection without waiting, and waits for all 1,000,000 responses; it does this 10 times after a warm-up. Each request and response is built and parsed in full, with a string field. Default settings, loopback, JDK 25, 16-core machine, server already warm:
@@ -352,7 +350,7 @@ Round 4: 1000000 round trips in 137 ms, 7292 round trips per millisecond
 Round 5: 1000000 round trips in 107 ms, 9339 round trips per millisecond
 ```
 
-That's about 5–10 million round trips per second, against about 2 million for 1.x on the same machine. One way on one connection, with small messages, a separate probe measured about 9–11 million messages per second, and 6–8 million with TLS 1.3.
+That's about 5–10 million round trips per second. One way on one connection, with small messages, a separate probe measured about 9–11 million messages per second, and 6–8 million with TLS 1.3.
 
 Per message, the library itself allocates 24 bytes on the sending side (the queue node) and nothing on the writer; the receiving side allocates only what protobuf's parser does (about 40 bytes for a small numeric message, nothing with a [raw handler](#raw-handlers)). Results depend on hardware, message size and network: run the samples to measure your own setup.
 
@@ -364,10 +362,6 @@ Per message, the library itself allocates 24 bytes on the sending side (the queu
 ```
 
 Use the Maven Wrapper (`./mvnw`). Building requires JDK 25 or later.
-
-## History
-
-2.0 is a rewrite. 1.x was built on Java NIO asynchronous channels, with no TLS or backpressure and a different API; its last version is tagged [`1.x-final`](https://github.com/quantranuk/protobuf-nio/tree/1.x-final).
 
 ## License
 
