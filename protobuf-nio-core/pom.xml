@@ -56,6 +56,32 @@
                     </execution>
                 </executions>
             </plugin>
+            <!-- Tests are compiled into the module and run on the module path. AllocationTest reads per-thread
+                 allocation counters from jdk.management, which the library itself doesn't need. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <compilerArgs>
+                                <arg>--add-modules</arg>
+                                <arg>jdk.management</arg>
+                                <arg>--add-reads</arg>
+                                <arg>io.github.quantranuk.protobuf.nio=java.management,jdk.management</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>--add-modules jdk.management --add-reads io.github.quantranuk.protobuf.nio=java.management,jdk.management</argLine>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 

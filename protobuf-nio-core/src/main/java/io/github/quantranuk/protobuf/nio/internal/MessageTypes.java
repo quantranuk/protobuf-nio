@@ -85,13 +85,31 @@ final class MessageTypes {
         try {
             return parserOf(type);
         } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
-            throw protocolException("Unable to get the parser of " + className, e);
+            throw protocolException("Unable to get the parser of " + className + ": " + e.getMessage(), e);
         }
     }
 
-    /** The parser of a generated protobuf message class, through its static {@code getDefaultInstance()}. */
+    /**
+     * The parser of a generated protobuf message class, through its static {@code getDefaultInstance()}.
+     * @throws IllegalAccessException if the class is in a named module that doesn't export its package to this one;
+     *                                the message says what to add to that module's descriptor
+     */
     static Parser<? extends MessageLite> parserOf(Class<?> type) throws ReflectiveOperationException {
-        MessageLite defaultInstance = (MessageLite) type.getMethod("getDefaultInstance").invoke(null);
+        MessageLite defaultInstance;
+        try {
+            defaultInstance = (MessageLite) type.getMethod("getDefaultInstance").invoke(null);
+        } catch (IllegalAccessException e) {
+            Module module = type.getModule();
+            Module self = MessageTypes.class.getModule();
+            if (module.isNamed() && !module.isExported(type.getPackageName(), self)) {
+                IllegalAccessException explained = new IllegalAccessException("module " + module.getName()
+                        + " doesn't export package " + type.getPackageName() + " to " + self.getName() + ": add \"exports "
+                        + type.getPackageName() + " to " + self.getName() + ";\" to its module-info.java");
+                explained.initCause(e);
+                throw explained;
+            }
+            throw e;
+        }
         return defaultInstance.getParserForType();
     }
 }

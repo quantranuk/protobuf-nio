@@ -217,6 +217,15 @@ The receiver uses the class name to find the generated class and its parser, so:
 
 The receiver only instantiates classes that implement `com.google.protobuf.MessageLite`. Any other class name is rejected without initializing the class.
 
+On the module path, 2.0 is the module `io.github.quantranuk.protobuf.nio`, and it can only call `getDefaultInstance()` on your generated classes if their package is exported to it. Otherwise the receiver disconnects the peer with an error naming the line to add:
+
+```java
+module com.example.app {
+    requires io.github.quantranuk.protobuf.nio;
+    exports com.example.app.proto to io.github.quantranuk.protobuf.nio;
+}
+```
+
 Still, by default a peer can make the receiver load any protobuf class on its classpath. When the peer isn't trusted, list the types you expect with `allowedMessageTypes(...)` on the 2.0 `ProtoClient` or `ProtoServer` builder: a message of any other type then disconnects the peer with `PROTOCOL_ERROR`, and its class name is checked against the list before any class is loaded.
 
 ## Dependency injection
@@ -272,6 +281,7 @@ SSLSession session = client.tlsSession();
 - The TLS handshake runs on each connection's own thread, within `handshakeTimeout`, before the protocol preamble. If it fails, `connect()` throws and no listener method is called on either side; the reason is `TLS_ERROR`.
 - The client checks that the server's certificate matches the host name it was given, as HTTPS clients do. `tlsHostnameVerification(false)` turns that off, for tests only.
 - Both sides must use TLS: a TLS client and a plain server (or the reverse) fail to connect.
+- A handshake rejected by the server (for example a missing client certificate with `TlsClientAuth.NEED`) may surface on the client as a connection reset rather than an `SSLException`: with TLS 1.3, the client's side of the handshake is over before the server checks its certificate.
 - `tlsSession()` on a client or a server connection gives the negotiated protocol, cipher suite and peer certificates.
 
 Throughput with TLS (TLS 1.3, loopback, small messages, one connection, one way) is about 6–8 million messages per second, against 9–11 million without.

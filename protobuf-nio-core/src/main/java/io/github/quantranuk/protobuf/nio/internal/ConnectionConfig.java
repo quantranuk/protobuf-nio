@@ -245,6 +245,8 @@ public final class ConnectionConfig {
             Objects.requireNonNull(type, "type");
             try {
                 return MessageTypes.parserOf(type);
+            } catch (IllegalAccessException e) {
+                throw new IllegalArgumentException("Unable to get the parser of " + type.getName() + ": " + e.getMessage(), e);
             } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
                 throw new IllegalArgumentException("Not a generated protobuf message class: " + type.getName(), e);
             }

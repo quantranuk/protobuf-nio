@@ -103,14 +103,4 @@ public final class ProtobufSerializer {
     public static int getSerializedSize(MessageLite message) {
         return HEADER_LENGTH + ENCODED_CLASS_NAMES.get(message.getClass()).length + message.getSerializedSize();
     }
-
-    /** @return the class name length field of a frame header */
-    public static int extractProtobufClassNameLength(byte[] header) {
-        return ByteUtils.readInteger(header, Integer.BYTES);
-    }
-
-    /** @return the payload length field of a frame header */
-    public static int extractProtobufPayloadLength(byte[] header) {
-        return ByteUtils.readInteger(header, 2 * Integer.BYTES);
-    }
 }

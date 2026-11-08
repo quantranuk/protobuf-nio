@@ -21,8 +21,8 @@ public class ProtobufSerializerTest {
         byte[] frame = ProtobufSerializer.serialize(message);
         ByteBuffer buffer = ByteBuffer.wrap(frame);
         assertEquals(ProtobufSerializer.SIGNATURE, buffer.getInt());
-        int nameLength = ProtobufSerializer.extractProtobufClassNameLength(frame);
-        int payloadLength = ProtobufSerializer.extractProtobufPayloadLength(frame);
+        int nameLength = buffer.getInt();
+        int payloadLength = buffer.getInt();
         assertEquals(message.getClass().getName().length(), nameLength);
         assertEquals(message.getSerializedSize(), payloadLength);
         assertEquals(ProtobufSerializer.HEADER_LENGTH + nameLength + payloadLength, frame.length);

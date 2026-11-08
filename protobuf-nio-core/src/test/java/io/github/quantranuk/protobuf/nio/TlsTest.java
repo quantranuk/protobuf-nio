@@ -152,8 +152,8 @@ public class TlsTest {
                 }).build()));
 
         ProtoClient anonymous = track(clientBuilder(server, "localhost", tls.clientContext("TLS", null)).build());
-        assertThrows(SSLException.class, anonymous::connect);
-        assertEquals(DisconnectReason.TLS_ERROR, anonymous.awaitClosed());
+        assertThrows(IOException.class, anonymous::connect);
+        assertRejectedByThePeer(anonymous.awaitClosed());
         assertNull(sessions.poll(300, TimeUnit.MILLISECONDS));
 
         ProtoClient authenticated = track(clientBuilder(server, "localhost", tls.clientContext("TLS", tls.client)).build());
@@ -169,8 +169,8 @@ public class TlsTest {
         AtomicInteger serverCalls = new AtomicInteger();
         ProtoServer plain = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0)).listener(counting(serverCalls)));
         ProtoClient tlsClient = track(clientBuilder(plain, "localhost", tls.clientContext("TLS", null)).build());
-        assertThrows(SSLException.class, tlsClient::connect);
-        assertEquals(DisconnectReason.TLS_ERROR, tlsClient.awaitClosed());
+        assertThrows(IOException.class, tlsClient::connect);
+        assertRejectedByThePeer(tlsClient.awaitClosed());
         assertNoConnections(plain, serverCalls);
     }
 
@@ -259,6 +259,17 @@ public class TlsTest {
                 calls.incrementAndGet();
             }
         };
+    }
+
+    /**
+     * When the peer is the one that rejects the handshake, it closes with this side's bytes still unread, which sends a
+     * TCP reset; the reset can overtake the peer's TLS alert (or preamble). So this side sees either the TLS error or
+     * a connection reset. With TLS 1.3 that includes a rejected client certificate: the client's side of the handshake
+     * is already over when the server checks it.
+     */
+    private static void assertRejectedByThePeer(DisconnectReason reason) {
+        assertTrue(reason == DisconnectReason.TLS_ERROR || reason == DisconnectReason.IO_ERROR
+                || reason == DisconnectReason.CLOSED_BY_PEER, reason.toString());
     }
 
     /** No listener call, and no connection left open (a failed handshake is never reported). */
