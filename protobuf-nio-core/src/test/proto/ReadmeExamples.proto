@@ -19,6 +19,25 @@ message PriceUpdate {
   double price = 2;
 }
 
+message Login {
+  string user = 1;
+}
+
+message NewOrder {
+  int64 id = 1;
+  string symbol = 2;
+  int64 quantity = 3;
+}
+
+message CancelOrder {
+  int64 id = 1;
+}
+
+message OrderStatus {
+  int64 order_id = 1;
+  string status = 2;
+}
+
 message LoginRequest {
   string user = 1;
 }

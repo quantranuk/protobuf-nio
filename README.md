@@ -4,21 +4,25 @@
 
 # protobuf-nio
 
-Send [Protocol Buffers](https://protobuf.dev/) messages between Java applications over TCP. Define your messages in a `.proto` file, send any of them from either side, and receive them already parsed. Each connection is a plain socket served by two virtual threads: no Netty, no framework, and only `protobuf-java` and `slf4j-api` as dependencies.
-
-`Ping` and `Pong` are ordinary classes generated from your `.proto` file:
+Send [Protocol Buffers](https://protobuf.dev/) messages between Java applications over TCP. Each connection is a plain socket served by two virtual threads: no Netty, no framework, and only `protobuf-java` and `slf4j-api` as dependencies.
 
 ```java
 ProtoServer server = ProtoServer.builder(3456)
-        .onMessage(Ping.class, (connection, ping) -> connection.send(Pong.newBuilder().setText("pong").build()))
+        .onMessage(Login.class, (connection, login) -> connection.attach(login.getUser()))
+        .onMessage(NewOrder.class, (connection, order) ->
+                connection.send(OrderStatus.newBuilder().setOrderId(order.getId()).setStatus("accepted").build()))
+        .onMessage(CancelOrder.class, (connection, cancel) ->
+                connection.send(OrderStatus.newBuilder().setOrderId(cancel.getId()).setStatus("cancelled").build()))
         .build();
 server.start();
 
 ProtoClient client = ProtoClient.builder("localhost", 3456)
-        .onMessage(Pong.class, (c, pong) -> System.out.println(pong.getText()))
+        .onMessage(OrderStatus.class, (c, status) -> System.out.println(status.getOrderId() + ": " + status.getStatus()))
         .build();
 client.connect();
-client.send(Ping.newBuilder().setText("ping").build());
+client.send(Login.newBuilder().setUser("alice").build());
+client.send(NewOrder.newBuilder().setId(1).setSymbol("ACME").setQuantity(100).build());
+client.send(CancelOrder.newBuilder().setId(1).build());   // prints "1: accepted", then "1: cancelled"
 ```
 
 - **Protobuf-native:** send any generated message and receive it on the other side already parsed. There are no type IDs or registrations to keep in sync: messages are identified by their class.
