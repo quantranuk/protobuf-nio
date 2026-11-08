@@ -6,47 +6,25 @@
 
 Send [Protocol Buffers](https://protobuf.dev/) messages between Java applications over TCP. Define your messages in a `.proto` file, send any of them from either side, and receive them already parsed. Each connection is a plain socket served by two virtual threads: no Netty, no framework, and only `protobuf-java` and `slf4j-api` as dependencies.
 
-```proto
-syntax = "proto3";
-option java_package = "com.example.chat";
-option java_multiple_files = true;
-
-message Ping { string text = 1; }
-message Pong { string text = 1; }
-```
+`Ping` and `Pong` are ordinary classes generated from your `.proto` file:
 
 ```java
-import com.example.chat.Ping;
-import com.example.chat.Pong;
-import io.github.quantranuk.protobuf.nio.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
+// Server: answers every Ping with a Pong
+ProtoServer server = ProtoServer.builder(3456)
+        .listener(ProtoServerListener.builder()
+                .onMessage(Ping.class, (connection, ping) -> connection.send(Pong.newBuilder().setText("pong").build()))
+                .build())
+        .build();
+server.start();
 
-public class Example {
-    public static void main(String[] args) throws Exception {
-        // A server that answers every Ping with a Pong, on the connection it came from
-        ProtoServer server = ProtoServer.builder(3456)
-                .listener(ProtoServerListener.builder()
-                        .onMessage(Ping.class, (connection, ping) ->
-                                connection.send(Pong.newBuilder().setText("pong: " + ping.getText()).build()))
-                        .build())
-                .build();
-        server.start();
-
-        // A client that sends a Ping and waits for the Pong
-        CompletableFuture<Pong> reply = new CompletableFuture<>();
-        try (ProtoClient client = ProtoClient.builder("localhost", 3456)
-                .listener(ProtoClientListener.builder()
-                        .onMessage(Pong.class, (c, pong) -> reply.complete(pong))
-                        .build())
-                .build()) {
-            client.connect();
-            client.send(Ping.newBuilder().setText("hello").build());
-            System.out.println(reply.get(5, TimeUnit.SECONDS).getText());   // pong: hello
-        }
-        server.close();
-    }
-}
+// Client: sends a Ping and prints the Pong
+ProtoClient client = ProtoClient.builder("localhost", 3456)
+        .listener(ProtoClientListener.builder()
+                .onMessage(Pong.class, (c, pong) -> System.out.println(pong.getText()))
+                .build())
+        .build();
+client.connect();
+client.send(Ping.newBuilder().setText("ping").build());
 ```
 
 - **Protobuf-native:** send any generated message and receive it on the other side already parsed. There are no type IDs or registrations to keep in sync: messages are identified by their class.
