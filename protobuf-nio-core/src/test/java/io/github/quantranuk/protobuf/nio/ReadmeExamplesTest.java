@@ -28,7 +28,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * Each code block becomes the body of a method in its own class, which declares what the examples take for granted:
  * the messages of {@code ReadmeExamples.proto} and the test protos, a logger {@code log}, a message {@code update}, the
  * TLS contexts {@code serverContext} and {@code clientContext}, a flag {@code running}, and an
- * {@code onPriceUpdate} method. A block that starts with {@code module} (a module declaration) isn't compiled.
+ * {@code onPriceUpdate} method. A block that starts with {@code import} is a complete source file: it's compiled as it
+ * is, in a package of its own, with the example messages imported. A block that starts with {@code module} (a module
+ * declaration) isn't compiled.
  */
 public class ReadmeExamplesTest {
 
@@ -61,6 +63,16 @@ public class ReadmeExamplesTest {
             // %s line %d
             """;
 
+    /** Put before a complete example: its own package, and the messages the examples use. */
+    private static final String STANDALONE_HEADER = """
+            package readme.%s;
+            // %s line %d
+            import io.github.quantranuk.protobuf.nio.proto.TestHeartBeat.*;
+            import io.github.quantranuk.protobuf.nio.readme.*;
+            """;
+
+    private static final Pattern CLASS_NAME = Pattern.compile("(?:class|record|interface)\\s+(\\w+)");
+
     private static final String FOOTER = """
 
                 }
@@ -87,9 +99,19 @@ public class ReadmeExamplesTest {
         List<String> command = new ArrayList<>(List.of(tool("javac"), "-nowarn", "-proc:none",
                 "-d", directory.resolve("out").toString(), "-cp", classpath()));
         for (Example example : examples) {
-            Path source = sources.resolve(example.className() + ".java");
-            Files.writeString(source, HEADER.formatted(example.className(), example.document(), example.line())
-                    + example.code() + FOOTER);
+            Path source;
+            if (example.code().startsWith("import ")) {
+                Matcher name = CLASS_NAME.matcher(example.code());
+                assertTrue(name.find(), "No class in the complete example at " + example.document() + " line " + example.line());
+                source = sources.resolve(example.className()).resolve(name.group(1) + ".java");
+                Files.createDirectories(source.getParent());
+                Files.writeString(source, STANDALONE_HEADER.formatted(example.className(), example.document(), example.line())
+                        + example.code() + "\n");
+            } else {
+                source = sources.resolve(example.className() + ".java");
+                Files.writeString(source, HEADER.formatted(example.className(), example.document(), example.line())
+                        + example.code() + FOOTER);
+            }
             command.add(source.toString());
         }
         Process javac = new ProcessBuilder(command).redirectErrorStream(true).start();
@@ -98,7 +120,7 @@ public class ReadmeExamplesTest {
         if (javac.exitValue() != 0) {
             StringBuilder report = new StringBuilder("Examples that don't compile (the generated class names its document and line):\n");
             for (Example example : examples) {
-                if (output.contains(example.className() + ".java")) {
+                if (output.contains(example.className() + ".java") || output.contains(example.className() + File.separator)) {
                     report.append("  ").append(example.className()).append(": ").append(example.document())
                             .append(" line ").append(example.line()).append('\n');
                 }

@@ -85,7 +85,8 @@ builds, runs the tests, builds sources and Javadoc jars, signs every artifact an
 1. **Dry run.** On the repository's Actions tab, open **Release** and click **Run workflow** on `master`. It does the
    whole release for the current version without `-SNAPSHOT`, except the upload: the bundle that would be published
    and the release notes are kept as an artifact of the run. This checks the secrets and the signing too.
-2. **Release commit.** Set the release version (no `-SNAPSHOT`) in the three `pom.xml` files, rename
+2. **Release commit.** Set the release version (no `-SNAPSHOT`) in the three `pom.xml` files and in `llms.txt`'s
+   Install section, rename
    `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD` (and point its link at the bottom to
    `https://github.com/quantranuk/protobuf-nio/releases/tag/vX.Y.Z`), then commit and push.
 3. **Tag.** `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow checks that the tag matches the POM version and
