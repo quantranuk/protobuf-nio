@@ -10,6 +10,8 @@
     <modelVersion>4.0.0</modelVersion>
 
     <artifactId>protobuf-nio-core</artifactId>
+    <name>protobuf-nio-core</name>
+    <description>The protobuf-nio library: ProtoServer and ProtoClient for exchanging Protocol Buffers messages over TCP, with TLS, backpressure, timeouts and heartbeats.</description>
 
     <dependencies>
         <dependency>

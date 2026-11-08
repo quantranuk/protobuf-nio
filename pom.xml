@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- child.project.url.inherit.append.path="false": modules inherit the URL as is, without their artifactId appended -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
+         child.project.url.inherit.append.path="false">
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>io.github.quantranuk</groupId>
@@ -12,6 +14,41 @@
         <module>protobuf-nio-sample</module>
     </modules>
     <packaging>pom</packaging>
+
+    <name>protobuf-nio</name>
+    <description>Send and receive Protocol Buffers messages over TCP, on virtual threads, with TLS and backpressure, without Netty or Mina.</description>
+    <url>https://github.com/quantranuk/protobuf-nio</url>
+    <inceptionYear>2017</inceptionYear>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/license/mit</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>quantranuk</id>
+            <name>Quan Tran</name>
+            <url>https://github.com/quantranuk</url>
+        </developer>
+    </developers>
+
+    <scm child.scm.connection.inherit.append.path="false"
+         child.scm.developerConnection.inherit.append.path="false"
+         child.scm.url.inherit.append.path="false">
+        <connection>scm:git:https://github.com/quantranuk/protobuf-nio.git</connection>
+        <developerConnection>scm:git:git@github.com:quantranuk/protobuf-nio.git</developerConnection>
+        <url>https://github.com/quantranuk/protobuf-nio</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <issueManagement>
+        <system>GitHub Issues</system>
+        <url>https://github.com/quantranuk/protobuf-nio/issues</url>
+    </issueManagement>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

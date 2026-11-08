@@ -10,6 +10,8 @@
     <modelVersion>4.0.0</modelVersion>
 
     <artifactId>protobuf-nio-sample</artifactId>
+    <name>protobuf-nio-sample</name>
+    <description>Runnable examples and benchmarks for protobuf-nio. Not published.</description>
 
     <dependencies>
         <dependency>
