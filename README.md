@@ -1,15 +1,71 @@
 [![Build](https://github.com/quantranuk/protobuf-nio/actions/workflows/build.yml/badge.svg)](https://github.com/quantranuk/protobuf-nio/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Java 25+](https://img.shields.io/badge/Java-25%2B-blue.svg)](https://openjdk.org/projects/jdk/25/)
 
 # protobuf-nio
 
-A small Java library for sending and receiving [Protocol Buffers](https://protobuf.dev/) messages over TCP. It has no Netty or Mina dependency: each connection is a plain blocking socket served by two virtual threads.
+Send [Protocol Buffers](https://protobuf.dev/) messages between Java applications over TCP. Define your messages in a `.proto` file, send any of them from either side, and receive them already parsed. Each connection is a plain socket served by two virtual threads: no Netty, no framework, and only `protobuf-java` and `slf4j-api` as dependencies.
 
-- **No framework dependencies:** only `protobuf-java` and `slf4j-api`.
-- **Protobuf-native:** send any generated message and receive it on the other side already parsed. No per-type registration or IDs to agree on.
+```proto
+syntax = "proto3";
+option java_package = "com.example.chat";
+option java_multiple_files = true;
+
+message Ping { string text = 1; }
+message Pong { string text = 1; }
+```
+
+```java
+import com.example.chat.Ping;
+import com.example.chat.Pong;
+import io.github.quantranuk.protobuf.nio.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // A server that answers every Ping with a Pong, on the connection it came from
+        ProtoServer server = ProtoServer.builder(3456)
+                .listener(ProtoServerListener.builder()
+                        .onMessage(Ping.class, (connection, ping) ->
+                                connection.send(Pong.newBuilder().setText("pong: " + ping.getText()).build()))
+                        .build())
+                .build();
+        server.start();
+
+        // A client that sends a Ping and waits for the Pong
+        CompletableFuture<Pong> reply = new CompletableFuture<>();
+        try (ProtoClient client = ProtoClient.builder("localhost", 3456)
+                .listener(ProtoClientListener.builder()
+                        .onMessage(Pong.class, (c, pong) -> reply.complete(pong))
+                        .build())
+                .build()) {
+            client.connect();
+            client.send(Ping.newBuilder().setText("hello").build());
+            System.out.println(reply.get(5, TimeUnit.SECONDS).getText());   // pong: hello
+        }
+        server.close();
+    }
+}
+```
+
+- **Protobuf-native:** send any generated message and receive it on the other side already parsed. There are no type IDs or registrations to keep in sync: messages are identified by their class.
 - **Simple threading:** each connection's callbacks run in order on its own virtual thread. A handler may block; that stalls only its own connection.
-- **Backpressure:** bounded send queues with a choice of overflow policy (block, reject, drop oldest, disconnect).
-- **TLS**, timeouts, heartbeats, graceful close, connection limits, an allowlist of accepted message types for untrusted peers.
+- **Backpressure:** bounded send queues with a choice of overflow policy (block, reject, drop oldest, disconnect), and every message you send is either written or reported back to you.
+- **Production features:** TLS, timeouts, heartbeats, graceful close, connection limits, and an allowlist of accepted message types for untrusted peers.
 - **Fast and lean:** about 7 million pipelined request/response round trips per second on one connection, and about 7 KB of heap per idle connection (see [Performance](#performance)). Sending allocates nothing per message beyond a queue node.
+
+## When to use it
+
+protobuf-nio is a good fit for **long-lived connections between Java applications that exchange protobuf messages in both directions**: streaming updates, internal publish/subscribe, game or trading servers, telemetry, and services that push events to each other. You get framing, threading, backpressure, TLS and timeouts without adopting a framework.
+
+Use something else when:
+
+- **The other side isn't Java,** or doesn't have the same generated classes: messages are identified by their Java class name. gRPC works across languages.
+- **You want RPC semantics:** service definitions, deadlines, status codes, interceptors, or HTTP/2 infrastructure such as proxies and load balancers in between. That's what gRPC is for.
+- **You need your own wire format,** or protocols other than protobuf over TCP: Netty gives you full control, at the cost of writing the codec and protocol yourself.
+
+Compared with plain sockets, protobuf-nio is the part you'd otherwise write yourself: message framing, a reader and writer per connection, bounded queues, a protocol handshake, heartbeats, write timeouts, and closing without losing data.
 
 > **Limitations:** both peers must be Java and have the same generated protobuf classes on their classpath (see [Wire format](#wire-format)).
 
@@ -40,7 +96,7 @@ Then add the dependency:
 
 Your generated protobuf classes must be compatible with the `protobuf-java` version the library brings in (4.x). If your project declares its own `protobuf-java` version, Maven uses yours.
 
-## Quick start
+## Usage
 
 ### Server
 
