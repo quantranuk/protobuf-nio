@@ -99,8 +99,8 @@ public final class DefaultProtoClient implements ProtoClient {
     }
 
     @Override
-    public CompletableFuture<Void> connectAsync() {
-        CompletableFuture<Void> future = new CompletableFuture<>();
+    public CompletableFuture<ProtoClient> connectAsync() {
+        CompletableFuture<ProtoClient> future = new CompletableFuture<>();
         Connection c;
         try {
             c = beginConnect();
@@ -111,7 +111,7 @@ public final class DefaultProtoClient implements ProtoClient {
         Thread.ofVirtual().name("protobuf-nio-connect-" + id).start(() -> {
             try {
                 finishConnect(c);
-                future.complete(null);
+                future.complete(this);
             } catch (Throwable t) {
                 future.completeExceptionally(t);
             }
@@ -184,9 +184,8 @@ public final class DefaultProtoClient implements ProtoClient {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
-    public <T> T attachment() {
-        return (T) attachment;
+    public Object attachment() {
+        return attachment;
     }
 
     @Override

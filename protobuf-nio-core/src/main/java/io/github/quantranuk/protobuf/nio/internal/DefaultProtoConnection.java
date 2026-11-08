@@ -31,6 +31,11 @@ final class DefaultProtoConnection implements ProtoConnection {
     }
 
     @Override
+    public ProtoServer server() {
+        return server;
+    }
+
+    @Override
     public InetSocketAddress remoteAddress() {
         return connection.remoteAddress();
     }
@@ -85,9 +90,8 @@ final class DefaultProtoConnection implements ProtoConnection {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
-    public <T> T attachment() {
-        return (T) attachment;
+    public Object attachment() {
+        return attachment;
     }
 
     @Override

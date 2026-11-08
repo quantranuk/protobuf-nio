@@ -371,6 +371,19 @@ public class ConnectionTest {
     }
 
     @Test
+    public void zeroMeansNoLimitForEveryWait() {
+        ConnectionConfig config = config().handshakeTimeout(Duration.ZERO).closeTimeout(Duration.ZERO)
+                .sendTimeout(Duration.ZERO).readTimeout(Duration.ZERO).writeTimeout(Duration.ZERO).build();
+        assertEquals(ConnectionConfig.NO_LIMIT_NANOS, config.handshakeTimeoutNanos);
+        assertEquals(ConnectionConfig.NO_LIMIT_NANOS, config.closeTimeoutNanos);
+        assertEquals(ConnectionConfig.NO_LIMIT_NANOS, config.sendTimeoutNanos);
+        assertEquals(0, config.readTimeoutNanos, "read timeout: none");
+        assertEquals(0, config.writeTimeoutNanos, "write timeout: none");
+        assertEquals(ConnectionConfig.NO_LIMIT_NANOS, config().closeTimeout(Duration.ofDays(1_000_000)).build().closeTimeoutNanos,
+                "durations beyond toNanos() saturate instead of throwing");
+    }
+
+    @Test
     public void allowlistRejectsInvalidTypes() {
         assertThrows(IllegalArgumentException.class, () -> config().allowedMessageTypes());
         assertThrows(IllegalArgumentException.class, () -> config().allowedMessageTypes(MessageLite.class));
@@ -592,8 +605,9 @@ public class ConnectionTest {
     }
 
     @Test
-    public void closeWithZeroTimeoutReportsEveryMessageAsWrittenOrFailed() throws Exception {
-        Pair pair = connect(config().closeTimeout(Duration.ZERO), config());
+    public void closeWithATinyTimeoutReportsEveryMessageAsWrittenOrFailed() throws Exception {
+        // A 1 ns close timeout closes at once, without flushing
+        Pair pair = connect(config().closeTimeout(Duration.ofNanos(1)), config());
         int total = 200_000;
         for (int i = 0; i < total; i++) {
             pair.client.connection.send(request(i));
@@ -630,7 +644,7 @@ public class ConnectionTest {
         };
         CountDownLatch gate = new CountDownLatch(1);
         Socket[] sockets = socketPair();
-        Connection client = track(new Connection(sockets[0], config().closeTimeout(Duration.ZERO)
+        Connection client = track(new Connection(sockets[0], config().closeTimeout(Duration.ofNanos(1))
                 .socketOption(StandardSocketOptions.SO_SNDBUF, 4096).build(), throwing));
         Side server = side(sockets[1], config());
         server.events.onMessage = (connection, message) -> {

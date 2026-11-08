@@ -442,7 +442,7 @@ public final class Connection {
         try {
             switch (config.overflowPolicy) {
                 case BLOCK -> {
-                    if (mayBlock && config.sendTimeoutNanos > 0 && !isWriterThread() && awaitRoom(size)) {
+                    if (mayBlock && !isWriterThread() && awaitRoom(size)) {
                         return offer(item, size);
                     }
                 }
@@ -537,14 +537,14 @@ public final class Connection {
 
     /**
      * Stops accepting sends, writes what's queued and closes, within the close timeout; then closes regardless, and
-     * messages still queued fail with {@code CLOSED}. During the handshake, or with a zero close timeout, closes at once.
+     * messages still queued fail with {@code CLOSED}. During the handshake, closes at once.
      * Idempotent.
      * <p>
      * Blocks until the socket is closed, except on this connection's own threads: on the writer thread it returns at
      * once, and on the reader thread it waits only for the flush (the reader is the one that sees the peer's FIN).
      */
     public void close() {
-        if (config.closeTimeoutNanos == 0 || state.get() == HANDSHAKING) {
+        if (state.get() == HANDSHAKING) {
             terminate(CLOSED_LOCALLY);
             return;
         }
@@ -574,7 +574,7 @@ public final class Connection {
      * calls. A server uses this when it closes. Blocks until the socket is closed or the deadline passes.
      */
     public void closeAfterHandshake() {
-        if (config.closeTimeoutNanos == 0 || state.get() != HANDSHAKING) {
+        if (state.get() != HANDSHAKING) {
             close();
             return;
         }

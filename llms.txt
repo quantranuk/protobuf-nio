@@ -41,8 +41,8 @@ public class Example {
 - Callbacks on both builders: `onConnected`, `onMessage(Type.class, handler)`, `onOtherMessage`, `onRawMessage(Type.class, handler)`, `onSendFailure`, `onDisconnected`. On a server they receive the `ProtoConnection`; on a client, the `ProtoClient`.
 - `server.start()`, `server.broadcast(message)`, `server.broadcast(message, filter)`, `server.connections()`, `server.close()`.
 - `client.connect()` (or `connectAsync()`), `client.send(message)`, `client.close()`, `client.awaitClosed()`.
-- `connection.send(message)`, `connection.close()`, `connection.attach(state)` / `connection.attachment()`.
-- Settings include `readTimeout`, `heartbeatInterval`, `writeTimeout`, `closeTimeout`, `maxMessageSize`, `maxPendingMessages`, `maxPendingBytes`, `overflowPolicy` (`BLOCK`, `REJECT`, `DROP_OLDEST`, `DISCONNECT`), `tls(SSLContext)`, `allowedMessageTypes(...)`, and on the server `maxConnections`.
+- `connection.send(message)`, `connection.close()`, `connection.server()` (to broadcast from a callback), `connection.attach(state)` / `connection.attachment()` (returns `Object`).
+- Settings include `readTimeout`, `heartbeatInterval`, `writeTimeout`, `closeTimeout`, `maxMessageSize`, `maxPendingMessages`, `maxPendingBytes`, `overflowPolicy` (`BLOCK`, `REJECT`, `DROP_OLDEST`, `DISCONNECT`), `tls(SSLContext)`, `allowOnlyHandledTypes()` or `allowedMessageTypes(...)`, and on the server `maxConnections`. For every `Duration` setting, `Duration.ZERO` means no limit.
 
 ## Rules that are easy to get wrong
 
@@ -54,6 +54,8 @@ public class Example {
 6. **A failed `connect()` calls no callback.** It throws an `IOException` instead (`java.net.ProtocolException` if the peer isn't protobuf-nio, which retrying won't fix). `onDisconnected` only follows a successful connect, and it's always the last callback, exactly once.
 7. **On the module path**, export your generated package to the library: `exports com.example.proto to io.github.quantranuk.protobuf.nio;`. Otherwise receiving those messages fails with an error naming that line.
 8. **`close()` is graceful and blocks** until queued messages are written and the peer has closed, within `closeTimeout` (5 s by default).
+9. **`build()` rejects contradictions**: a type with both `onMessage` and `onRawMessage`, a handled type missing from `allowedMessageTypes`, or `allowOnlyHandledTypes()` with no handler, with `onOtherMessage` or with `allowedMessageTypes`. Use `allowOnlyHandledTypes()` for untrusted peers.
+10. **A callback can't use the server variable it's being built into** (`server` isn't assigned yet): use `connection.server()`.
 
 ## Documentation
 

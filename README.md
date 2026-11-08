@@ -9,10 +9,8 @@ Send [Protocol Buffers](https://protobuf.dev/) messages between Java application
 ```java
 ProtoServer server = ProtoServer.builder(3456)
         .onMessage(Login.class, (connection, login) -> connection.attach(login.getUser()))
-        .onMessage(NewOrder.class, (connection, order) ->
-                connection.send(OrderStatus.newBuilder().setOrderId(order.getId()).setStatus("accepted").build()))
-        .onMessage(CancelOrder.class, (connection, cancel) ->
-                connection.send(OrderStatus.newBuilder().setOrderId(cancel.getId()).setStatus("cancelled").build()))
+        .onMessage(NewOrder.class, (connection, order) -> connection.send(OrderStatus.newBuilder().setOrderId(order.getId()).setStatus("accepted").build()))
+        .onMessage(CancelOrder.class, (connection, cancel) -> connection.send(OrderStatus.newBuilder().setOrderId(cancel.getId()).setStatus("cancelled").build()))
         .build();
 server.start();
 
@@ -261,7 +259,7 @@ Whenever `send` returns `false` because the queue is full, `onSendFailure(REJECT
 
 `pendingMessages()` and `pendingBytes()` show how far behind a connection is.
 
-`server.broadcast(message)` encodes the message once and queues the bytes on every open connection; `broadcast(message, filter)` does the same for the connections that match a predicate, for example `connection -> connection.<Session>attachment().isSubscribed(topic)`. Broadcast never blocks: under `BLOCK`, a full queue rejects the message as under `REJECT`.
+`server.broadcast(message)` encodes the message once and queues the bytes on every open connection; `broadcast(message, filter)` does the same for the connections that match a predicate, for example `connection -> ((Session) connection.attachment()).isSubscribed(topic)`. Broadcast never blocks: under `BLOCK`, a full queue rejects the message as under `REJECT`. From inside a callback, reach the server with `connection.server()`, for example `connection.server().broadcast(chat)` in a chat server: the callback can't refer to the `server` variable it's being built into.
 
 ## Closing
 
@@ -285,24 +283,25 @@ Failures close the socket at once, without flushing.
 
 ## Configuration
 
-Both builders (`ProtoClient.builder(host, port)` and `ProtoServer.builder(port)`) take these settings. On the server they apply to each accepted connection. Invalid values throw `IllegalArgumentException` when the setting is called.
+Both builders (`ProtoClient.builder(host, port)` and `ProtoServer.builder(port)`) take these settings. On the server they apply to each accepted connection. Invalid values throw `IllegalArgumentException` when the setting is called, and `build()` throws it if the handlers and settings contradict each other (see [Untrusted peers](#untrusted-peers)). For every setting that takes a `Duration`, `Duration.ZERO` means no limit.
 
 | Setting | Default | Description |
 |---|---|---|
 | `onConnected`, `onMessage`, `onOtherMessage`, `onSendFailure`, `onDisconnected` | none | See [Callbacks and threads](#callbacks-and-threads). |
-| `handshakeTimeout(duration)` | 10 s | Time allowed for the TLS handshake and the protocol preamble. |
+| `handshakeTimeout(duration)` | 10 s | Time allowed for the TLS handshake and the protocol preamble. `Duration.ZERO` = no limit. |
 | `readTimeout(duration)` | none | Close if nothing is received for this long. Any frame resets it, heartbeats included. |
 | `heartbeatInterval(duration)` | none | Send a heartbeat frame when nothing has been sent for this long. Set it on the peer, below this side's `readTimeout`. |
 | `writeTimeout(duration)` | 10 s | Close if a socket write blocks for longer than this, typically because the peer stopped reading. `Duration.ZERO` = none. |
-| `closeTimeout(duration)` | 5 s | How long `close()` may spend writing queued messages. `Duration.ZERO` = close at once. |
+| `closeTimeout(duration)` | 5 s | How long `close()` may spend writing queued messages and waiting for the peer to close. `Duration.ZERO` = no limit. |
 | `readBufferSize(bytes)` | 64 KB | Largest socket read. Reads start small and grow only while they keep filling the buffer; idle connections drop back to 64 bytes after a second. |
 | `writeBufferSize(bytes)` | 64 KB | Largest batch of queued messages written in one go. A single larger message is still sent. |
 | `maxMessageSize(bytes)` | 64 MiB | Largest protobuf payload accepted from the peer, which is disconnected (`PROTOCOL_ERROR`) if it sends a larger one. |
 | `maxPendingMessages(count)` | 1,000,000 | Most messages queued and not yet written. |
 | `maxPendingBytes(bytes)` | 64 MiB | Most encoded bytes queued and not yet written. A single larger message is queued only when nothing else is pending. |
 | `overflowPolicy(policy)` | `BLOCK` | What `send` does when the queue is full (see [Sending and backpressure](#sending-and-backpressure)). |
-| `sendTimeout(duration)` | 10 s | How long `BLOCK` waits for room. `Duration.ZERO` = not at all. |
+| `sendTimeout(duration)` | 10 s | How long `BLOCK` waits for room. `Duration.ZERO` = no limit. To never wait, use `OverflowPolicy.REJECT`. |
 | `socketOption(option, value)` | `TCP_NODELAY` on | Any `java.net.SocketOption`, such as `SO_SNDBUF` or `SO_KEEPALIVE`. Unsupported options are ignored. |
+| `allowOnlyHandledTypes()` | off | Accept only the types that have an `onMessage` or `onRawMessage` handler (see [Untrusted peers](#untrusted-peers)). |
 | `allowedMessageTypes(types...)` | any | Accept only these message types (see [Untrusted peers](#untrusted-peers)). |
 | `onRawMessage(type, handler)` | none | Receive this type unparsed (see [Raw handlers](#raw-handlers)). |
 | `classLoader(loader)` | context class loader | Loads received message classes. The default is the thread's context class loader when `build()` runs. |
@@ -313,7 +312,7 @@ Client only:
 
 | Setting | Default | Description |
 |---|---|---|
-| `connectTimeout(duration)` | 10 s | TCP connect. `Duration.ZERO` = the operating system's timeout. |
+| `connectTimeout(duration)` | 10 s | TCP connect. `Duration.ZERO` = no limit (the operating system's own timeout still applies). |
 | `tlsHostnameVerification(boolean)` | true | With TLS, check that the server's certificate matches the host name. |
 
 Server only:
@@ -350,20 +349,24 @@ The `ByteBuffer` is a reused view over the connection's read buffer: it's valid 
 
 ## Untrusted peers
 
-By default, a peer can make the receiver load any protobuf message class on its classpath, by name. When the peer isn't trusted, list the types you expect:
+By default, a peer can make the receiver load any protobuf message class on its classpath, by name. When the peer isn't trusted, accept only the types you handle:
 
 ```java
 ProtoServer.builder(3456)
-        .allowedMessageTypes(LoginRequest.class, OrderRequest.class)
+        .allowOnlyHandledTypes()
+        .onMessage(LoginRequest.class, (connection, login) -> connection.attach(login.getUser()))
+        .onMessage(OrderRequest.class, (connection, order) -> { /* ... */ })
 ```
 
-A message of any other type then disconnects the peer with `PROTOCOL_ERROR`, and its class name is checked against the list before any class is loaded, and before its payload is read. Even without a list, the receiver only uses classes that implement `com.google.protobuf.MessageLite`, and checks that before initializing the class.
+A message of any other type then disconnects the peer with `PROTOCOL_ERROR`, and its class name is checked before any class is loaded, and before its payload is read. To list the accepted types yourself instead, use `allowedMessageTypes(LoginRequest.class, OrderRequest.class)`.
+
+`build()` refuses settings that would silently bypass a handler: a type with both an `onMessage` and an `onRawMessage` handler, or a handled type that `allowedMessageTypes` leaves out. Even without a list, the receiver only uses classes that implement `com.google.protobuf.MessageLite`, and checks that before initializing the class.
 
 ### Hardening checklist
 
 The defaults suit services on a trusted network. For a server that untrusted peers can reach:
 
-- **`allowedMessageTypes(...)`**: accept only the types you expect.
+- **`allowOnlyHandledTypes()`** (or `allowedMessageTypes(...)`): accept only the types you expect.
 - **`maxMessageSize(bytes)`**: each received message is held in memory whole, so set it to the largest message you really expect, rather than the 64 MiB default. Memory follows what a peer actually sends (a peer that announces a large message and stalls costs only what it sent), but a peer that does send a whole large message makes the receiver hold it.
 - **`readTimeout(duration)`** on the server, with **`heartbeatInterval(duration)`** below it on the clients: peers that go quiet are disconnected instead of holding a connection forever.
 - **`maxConnections(count)`**: caps file descriptors and memory. Peers still in their handshake are replaced first when the limit is reached, and a short `handshakeTimeout` limits how long they can hold a slot.
@@ -374,7 +377,9 @@ The defaults suit services on a trusted network. For a server that untrusted pee
 ProtoServer server = ProtoServer.builder(8443)
         .tls(serverContext)
         .tlsClientAuth(TlsClientAuth.NEED)
-        .allowedMessageTypes(LoginRequest.class, OrderRequest.class)
+        .allowOnlyHandledTypes()
+        .onMessage(LoginRequest.class, (connection, login) -> connection.attach(login.getUser()))
+        .onMessage(OrderRequest.class, (connection, order) -> { /* ... */ })
         .maxMessageSize(1024 * 1024)
         .readTimeout(Duration.ofSeconds(30))         // clients send heartbeats every 10 s
         .handshakeTimeout(Duration.ofSeconds(5))

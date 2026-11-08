@@ -14,7 +14,6 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.Objects;
 import java.util.concurrent.ThreadFactory;
-import java.util.function.Consumer;
 import java.util.function.Predicate;
 import javax.net.ssl.SSLContext;
 
@@ -154,6 +153,7 @@ public interface ProtoServer extends AutoCloseable {
         private final InetSocketAddress bindAddress;
         private final ConnectionConfig.Builder config = ConnectionConfig.builder().socketOption(StandardSocketOptions.SO_REUSEADDR, true);
         private final Callbacks.Builder<ProtoConnection> callbacks = Callbacks.builder();
+        private boolean allowOnlyHandledTypes;
         private int backlog = 1024;
         private int maxConnections = Integer.MAX_VALUE;
 
@@ -169,8 +169,9 @@ public interface ProtoServer extends AutoCloseable {
          * @param handler called with each new connection
          * @return this builder
          */
-        public Builder onConnected(Consumer<ProtoConnection> handler) {
-            callbacks.onConnected(handler);
+        public Builder onConnected(ConnectHandler handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onConnected(handler::onConnected);
             return this;
         }
 
@@ -283,7 +284,7 @@ public interface ProtoServer extends AutoCloseable {
         /**
          * Timeout of each connection's protocol preamble (and TLS handshake, when configured). Default 10 s.
          *
-         * @param timeout the timeout; must be positive
+         * @param timeout the timeout, or {@link Duration#ZERO} for no limit
          * @return this builder
          */
         public Builder handshakeTimeout(Duration timeout) {
@@ -328,7 +329,8 @@ public interface ProtoServer extends AutoCloseable {
         /**
          * How long closing a connection may spend writing queued messages. Default 5 s.
          *
-         * @param timeout the timeout, or {@link Duration#ZERO} to close at once without flushing
+         * @param timeout the timeout, or {@link Duration#ZERO} for no limit (wait as long as the flush and the peer's
+         *                close take)
          * @return this builder
          */
         public Builder closeTimeout(Duration timeout) {
@@ -407,7 +409,8 @@ public interface ProtoServer extends AutoCloseable {
         /**
          * How long {@link OverflowPolicy#BLOCK} waits for room. Default 10 s.
          *
-         * @param timeout the timeout, or {@link Duration#ZERO} to give up at once
+         * @param timeout the timeout, or {@link Duration#ZERO} for no limit; to never wait, use
+         *                {@link OverflowPolicy#REJECT}
          * @return this builder
          */
         public Builder sendTimeout(Duration timeout) {
@@ -443,6 +446,19 @@ public interface ProtoServer extends AutoCloseable {
         @SafeVarargs
         public final Builder allowedMessageTypes(Class<? extends MessageLite>... types) {
             config.allowedMessageTypes(types);
+            return this;
+        }
+
+        /**
+         * Accepts only the message types that have an {@link #onMessage} or {@link #onRawMessage} handler: the
+         * allowlist of {@link #allowedMessageTypes}, derived from the handlers when {@link #build()} runs. A peer that
+         * sends any other type is disconnected with {@link DisconnectReason#PROTOCOL_ERROR}, and that type's class is
+         * never loaded. The simplest safe setting when the peer isn't trusted.
+         *
+         * @return this builder
+         */
+        public Builder allowOnlyHandledTypes() {
+            allowOnlyHandledTypes = true;
             return this;
         }
 
@@ -497,10 +513,28 @@ public interface ProtoServer extends AutoCloseable {
          * Builds a server with the current settings. Call {@link ProtoServer#start()} on it to bind.
          *
          * @return a new, unstarted server
+         * @throws IllegalArgumentException if the handlers and the settings contradict each other: a type with both an
+         *                                  {@code onMessage} and an {@code onRawMessage} handler, a type with an
+         *                                  {@code onMessage} handler that {@link #allowedMessageTypes} doesn't list,
+         *                                  or {@link #allowOnlyHandledTypes()} together with
+         *                                  {@code allowedMessageTypes}, with {@code onOtherMessage}, or without any
+         *                                  handler
          */
         public ProtoServer build() {
-            return new DefaultProtoServer(bindAddress, backlog, maxConnections, config.build(), callbacks.build());
+            return new DefaultProtoServer(bindAddress, backlog, maxConnections, config.build(callbacks.messageTypes(), allowOnlyHandledTypes, callbacks.hasOtherMessageHandler()),
+                    callbacks.build());
         }
+    }
+
+    /** Called when a connection is open; see {@link Builder#onConnected}. */
+    @FunctionalInterface
+    interface ConnectHandler {
+        /**
+         * See {@link Builder#onConnected}.
+         *
+         * @param connection the new connection
+         */
+        void onConnected(ProtoConnection connection);
     }
 
     /**

@@ -15,7 +15,6 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadFactory;
-import java.util.function.Consumer;
 
 /**
  * A single-use client connection: build it, {@link #connect()} it, {@link #close()} it. Build a new one to reconnect
@@ -98,10 +97,11 @@ public interface ProtoClient extends AutoCloseable {
      * Same as {@link #connect()}, on a virtual thread. The client is in the connecting state when this returns, so
      * messages sent from then on are queued.
      *
-     * @return a future that completes when connected, or fails with the exception {@code connect()} would throw
-     * @throws IllegalStateException if {@code connect()} was already called, or the client was closed before connecting
+     * @return a future that completes with this client once connected, or fails with the exception {@code connect()}
+     *         would throw: an {@code IOException}, or an {@link IllegalStateException} if {@code connect()} was already
+     *         called or the client was closed before connecting
      */
-    CompletableFuture<Void> connectAsync();
+    CompletableFuture<ProtoClient> connectAsync();
 
     /**
      * Identifies the client, for example in logs.
@@ -199,11 +199,9 @@ public interface ProtoClient extends AutoCloseable {
      * Your own state, not used by the library (for example which session shared callbacks are serving). Visible to
      * every thread once {@link #attach} has returned.
      *
-     * @param <T> the type to cast the attachment to
-     * @return the last object passed to {@link #attach}, or {@code null}
-     * @throws ClassCastException if the attachment isn't a {@code T}, when the result is assigned
+     * @return the last object passed to {@link #attach}, or {@code null}; cast it to the type you attached
      */
-    <T> T attachment();
+    Object attachment();
 
     /**
      * Sets the object returned by {@link #attachment()}, replacing the previous one.
@@ -221,6 +219,7 @@ public interface ProtoClient extends AutoCloseable {
         private final InetSocketAddress address;
         private final ConnectionConfig.Builder config = ConnectionConfig.builder();
         private final Callbacks.Builder<ProtoClient> callbacks = Callbacks.builder();
+        private boolean allowOnlyHandledTypes;
         private Duration connectTimeout = Duration.ofSeconds(10);
 
         private Builder(InetSocketAddress address) {
@@ -235,8 +234,9 @@ public interface ProtoClient extends AutoCloseable {
          * @param handler called with the client once it's open
          * @return this builder
          */
-        public Builder onConnected(Consumer<ProtoClient> handler) {
-            callbacks.onConnected(handler);
+        public Builder onConnected(ConnectHandler handler) {
+            Objects.requireNonNull(handler, "handler");
+            callbacks.onConnected(handler::onConnected);
             return this;
         }
 
@@ -332,7 +332,7 @@ public interface ProtoClient extends AutoCloseable {
         /**
          * Timeout of the protocol preamble (and TLS handshake, when configured), after the TCP connect. Default 10 s.
          *
-         * @param timeout the timeout; must be positive
+         * @param timeout the timeout, or {@link Duration#ZERO} for no limit
          * @return this builder
          */
         public Builder handshakeTimeout(Duration timeout) {
@@ -376,7 +376,8 @@ public interface ProtoClient extends AutoCloseable {
         /**
          * How long {@code close()} may spend writing queued messages. Default 5 s.
          *
-         * @param timeout the timeout, or {@link Duration#ZERO} to close at once without flushing
+         * @param timeout the timeout, or {@link Duration#ZERO} for no limit (wait as long as the flush and the peer's
+         *                close take)
          * @return this builder
          */
         public Builder closeTimeout(Duration timeout) {
@@ -455,7 +456,8 @@ public interface ProtoClient extends AutoCloseable {
         /**
          * How long {@link OverflowPolicy#BLOCK} waits for room. Default 10 s.
          *
-         * @param timeout the timeout, or {@link Duration#ZERO} to give up at once
+         * @param timeout the timeout, or {@link Duration#ZERO} for no limit; to never wait, use
+         *                {@link OverflowPolicy#REJECT}
          * @return this builder
          */
         public Builder sendTimeout(Duration timeout) {
@@ -490,6 +492,19 @@ public interface ProtoClient extends AutoCloseable {
         @SafeVarargs
         public final Builder allowedMessageTypes(Class<? extends MessageLite>... types) {
             config.allowedMessageTypes(types);
+            return this;
+        }
+
+        /**
+         * Accepts only the message types that have an {@link #onMessage} or {@link #onRawMessage} handler: the
+         * allowlist of {@link #allowedMessageTypes}, derived from the handlers when {@link #build()} runs. A peer that
+         * sends any other type is disconnected with {@link DisconnectReason#PROTOCOL_ERROR}, and that type's class is
+         * never loaded. The simplest safe setting when the peer isn't trusted.
+         *
+         * @return this builder
+         */
+        public Builder allowOnlyHandledTypes() {
+            allowOnlyHandledTypes = true;
             return this;
         }
 
@@ -545,10 +560,28 @@ public interface ProtoClient extends AutoCloseable {
          * Builds a client with the current settings. Call {@link ProtoClient#connect()} on it to connect.
          *
          * @return a new, unconnected client
+         * @throws IllegalArgumentException if the handlers and the settings contradict each other: a type with both an
+         *                                  {@code onMessage} and an {@code onRawMessage} handler, a type with an
+         *                                  {@code onMessage} handler that {@link #allowedMessageTypes} doesn't list,
+         *                                  or {@link #allowOnlyHandledTypes()} together with
+         *                                  {@code allowedMessageTypes}, with {@code onOtherMessage}, or without any
+         *                                  handler
          */
         public ProtoClient build() {
-            return new DefaultProtoClient(address, connectTimeout, config.build(), callbacks.build());
+            return new DefaultProtoClient(address, connectTimeout, config.build(callbacks.messageTypes(), allowOnlyHandledTypes, callbacks.hasOtherMessageHandler()),
+                    callbacks.build());
         }
+    }
+
+    /** Called when the client is open; see {@link Builder#onConnected}. */
+    @FunctionalInterface
+    interface ConnectHandler {
+        /**
+         * See {@link Builder#onConnected}.
+         *
+         * @param client the client that connected
+         */
+        void onConnected(ProtoClient client);
     }
 
     /**

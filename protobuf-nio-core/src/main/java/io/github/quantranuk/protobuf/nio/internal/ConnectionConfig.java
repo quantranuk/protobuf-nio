@@ -9,6 +9,7 @@ import java.net.SocketOption;
 import java.nio.ByteBuffer;
 import java.net.StandardSocketOptions;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -51,22 +52,30 @@ public final class ConnectionConfig {
     final boolean tlsHostnameVerification;
     final TlsClientAuth tlsClientAuth;
 
-    private ConnectionConfig(Builder b) {
-        handshakeTimeoutNanos = b.handshakeTimeout.toNanos();
-        readTimeoutNanos = b.readTimeout.toNanos();
-        heartbeatIntervalNanos = b.heartbeatInterval.toNanos();
-        writeTimeoutNanos = b.writeTimeout.toNanos();
-        closeTimeoutNanos = b.closeTimeout.toNanos();
-        idleShrinkDelayNanos = b.idleShrinkDelay.toNanos();
+    /**
+     * A wait with no limit: {@link Duration#ZERO} for the handshake, close and send timeouts. About 73 years, so that
+     * deadlines can be computed and compared with {@code System.nanoTime()} without special cases.
+     */
+    static final long NO_LIMIT_NANOS = Long.MAX_VALUE / 4;
+
+    private ConnectionConfig(Builder b, Map<ByteBuffer, Parser<? extends MessageLite>> allowedTypes) {
+        // Duration.ZERO means "no limit" for every timeout. The read and write timeouts and the heartbeat interval keep 0
+        // ("none") and are checked with > 0; the waits below become NO_LIMIT_NANOS instead.
+        handshakeTimeoutNanos = waitNanos(b.handshakeTimeout);
+        readTimeoutNanos = nanos(b.readTimeout);
+        heartbeatIntervalNanos = nanos(b.heartbeatInterval);
+        writeTimeoutNanos = nanos(b.writeTimeout);
+        closeTimeoutNanos = waitNanos(b.closeTimeout);
+        idleShrinkDelayNanos = nanos(b.idleShrinkDelay);
         readBufferSize = b.readBufferSize;
         writeBufferSize = b.writeBufferSize;
         maxMessageSize = b.maxMessageSize;
         maxPendingBytes = b.maxPendingBytes;
         maxPendingMessages = b.maxPendingMessages;
         overflowPolicy = b.overflowPolicy;
-        sendTimeoutNanos = b.sendTimeout.toNanos();
+        sendTimeoutNanos = waitNanos(b.sendTimeout);
         socketOptions = Collections.unmodifiableMap(new LinkedHashMap<>(b.socketOptions));
-        allowedTypes = b.allowedTypes;
+        this.allowedTypes = allowedTypes;
         rawHandlers = Map.copyOf(b.rawHandlers);
         classLoader = b.classLoader != null ? b.classLoader : defaultClassLoader();
         threadFactory = b.threadFactory;
@@ -89,6 +98,16 @@ public final class ConnectionConfig {
     }
 
     /** Mutable and reusable. Setters validate at once and throw {@link IllegalArgumentException}. */
+    /** @return the duration in nanoseconds, saturated at {@link #NO_LIMIT_NANOS} (toNanos() throws above 292 years) */
+    private static long nanos(Duration duration) {
+        return duration.compareTo(Duration.ofNanos(NO_LIMIT_NANOS)) >= 0 ? NO_LIMIT_NANOS : duration.toNanos();
+    }
+
+    /** @return {@link #nanos} for a wait, with {@link Duration#ZERO} meaning no limit */
+    private static long waitNanos(Duration duration) {
+        return duration.isZero() ? NO_LIMIT_NANOS : nanos(duration);
+    }
+
     public static final class Builder {
         private Duration handshakeTimeout = Duration.ofSeconds(10);
         private Duration readTimeout = Duration.ZERO;
@@ -115,9 +134,9 @@ public final class ConnectionConfig {
         private Builder() {
         }
 
-        /** TLS handshake plus protocol preamble; must be positive. */
+        /** TLS handshake plus protocol preamble; {@link Duration#ZERO} = no limit. */
         public Builder handshakeTimeout(Duration timeout) {
-            handshakeTimeout = positive(timeout, "handshakeTimeout");
+            handshakeTimeout = nonNegative(timeout, "handshakeTimeout");
             return this;
         }
 
@@ -139,7 +158,7 @@ public final class ConnectionConfig {
             return this;
         }
 
-        /** {@link Duration#ZERO} = close at once, without flushing. */
+        /** {@link Duration#ZERO} = no limit: wait as long as the flush and the peer's close take. */
         public Builder closeTimeout(Duration timeout) {
             closeTimeout = nonNegative(timeout, "closeTimeout");
             return this;
@@ -189,7 +208,7 @@ public final class ConnectionConfig {
             return this;
         }
 
-        /** How long {@link OverflowPolicy#BLOCK} waits for room; {@link Duration#ZERO} = not at all. */
+        /** How long {@link OverflowPolicy#BLOCK} waits for room; {@link Duration#ZERO} = no limit. */
         public Builder sendTimeout(Duration timeout) {
             sendTimeout = nonNegative(timeout, "sendTimeout");
             return this;
@@ -283,7 +302,51 @@ public final class ConnectionConfig {
         }
 
         public ConnectionConfig build() {
-            return new ConnectionConfig(this);
+            return new ConnectionConfig(this, allowedTypes);
+        }
+
+        /**
+         * Builds the configuration of a server or client, checked against the types that have an {@code onMessage}
+         * handler, so that a handler can't be silently bypassed: a type can't also have a raw handler (which would take
+         * all its messages), and with an allowlist every handled type must be on it (otherwise each such message would
+         * disconnect the peer). This builder isn't changed, so it stays reusable.
+         *
+         * @param handledTypes           the types with an {@code onMessage} handler
+         * @param onlyHandledTypes       accept only the handled types (and the raw-handler types, always accepted): the
+         *                               allowlist is derived from the handlers
+         * @param hasOtherMessageHandler whether {@code onOtherMessage} is set
+         * @throws IllegalArgumentException if the handlers and the settings contradict each other
+         */
+        public ConnectionConfig build(Collection<Class<? extends MessageLite>> handledTypes, boolean onlyHandledTypes,
+                                      boolean hasOtherMessageHandler) {
+            for (Class<? extends MessageLite> type : handledTypes) {
+                ByteBuffer name = encodedName(type);
+                if (rawHandlers.containsKey(name)) {
+                    throw new IllegalArgumentException(type.getName() + " has both an onMessage and an onRawMessage handler;"
+                            + " the raw handler would receive every message of that type");
+                }
+                if (allowedTypes != null && !allowedTypes.containsKey(name)) {
+                    throw new IllegalArgumentException(type.getName() + " has an onMessage handler but isn't in"
+                            + " allowedMessageTypes, so every message of that type would disconnect the peer");
+                }
+            }
+            if (!onlyHandledTypes) {
+                return build();
+            }
+            if (allowedTypes != null) {
+                throw new IllegalArgumentException("allowOnlyHandledTypes() and allowedMessageTypes() can't both be set");
+            }
+            if (hasOtherMessageHandler) {
+                throw new IllegalArgumentException("onOtherMessage would never be called with allowOnlyHandledTypes()");
+            }
+            if (handledTypes.isEmpty() && rawHandlers.isEmpty()) {
+                throw new IllegalArgumentException("allowOnlyHandledTypes() needs at least one onMessage or onRawMessage handler");
+            }
+            Map<ByteBuffer, Parser<? extends MessageLite>> allowed = new HashMap<>();
+            for (Class<? extends MessageLite> type : handledTypes) {
+                allowed.put(encodedName(type), parserOf(type));
+            }
+            return new ConnectionConfig(this, Map.copyOf(allowed));
         }
 
         private static Duration nonNegative(Duration d, String name) {

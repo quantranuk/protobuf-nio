@@ -5,8 +5,10 @@ import io.github.quantranuk.protobuf.nio.SendException;
 import com.google.protobuf.MessageLite;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Consumer;
 
 /**
@@ -110,6 +112,21 @@ public final class Callbacks<E> {
 
         public void onDisconnected(OnDisconnected<E> handler) {
             onDisconnected = Objects.requireNonNull(handler, "handler");
+        }
+
+        /** @return the types that have an {@code onMessage} handler */
+        @SuppressWarnings("unchecked")
+        public Set<Class<? extends MessageLite>> messageTypes() {
+            Set<Class<? extends MessageLite>> types = new HashSet<>();
+            for (Class<?> type : handlers.keySet()) {
+                types.add((Class<? extends MessageLite>) type);
+            }
+            return types;
+        }
+
+        /** @return whether {@code onOtherMessage} is set */
+        public boolean hasOtherMessageHandler() {
+            return onOtherMessage != null;
         }
 
         /** @return callbacks with the current handlers; later changes to this builder don't affect them */

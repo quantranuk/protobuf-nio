@@ -21,6 +21,14 @@ public interface ProtoConnection extends AutoCloseable {
     long id();
 
     /**
+     * The server that accepted this connection, for example to broadcast from a callback: a callback can't refer to
+     * the server variable it's being built into.
+     *
+     * @return the server
+     */
+    ProtoServer server();
+
+    /**
      * The client's address.
      *
      * @return the remote address of the socket
@@ -102,11 +110,9 @@ public interface ProtoConnection extends AutoCloseable {
      * Your own per-connection state, not used by the library (for example a session after login). Visible to every
      * thread once {@link #attach} has returned.
      *
-     * @param <T> the type to cast the attachment to
-     * @return the last object passed to {@link #attach}, or {@code null}
-     * @throws ClassCastException if the attachment isn't a {@code T}, when the result is assigned
+     * @return the last object passed to {@link #attach}, or {@code null}; cast it to the type you attached
      */
-    <T> T attachment();
+    Object attachment();
 
     /**
      * Sets the object returned by {@link #attachment()}, replacing the previous one.

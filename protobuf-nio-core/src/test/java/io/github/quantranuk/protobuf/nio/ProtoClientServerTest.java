@@ -31,6 +31,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -130,7 +131,7 @@ public class ProtoClientServerTest {
         BlockingQueue<String> seen = new LinkedBlockingQueue<>();
         ProtoServer server = startServer(serverBuilder()
                 .onConnected(connection -> connection.attach("session-" + connection.id()))
-                .onMessage(HeartBeatRequest.class, (connection, request) -> seen.add(connection.attachment())));
+                .onMessage(HeartBeatRequest.class, (connection, request) -> seen.add((String) connection.attachment())));
         ProtoClient client = client(clientBuilder(server));
         client.attach(42);
         assertEquals(42, (Integer) client.attachment());
@@ -203,7 +204,7 @@ public class ProtoClientServerTest {
     public void closeWhileConnectingMakesConnectThrow() throws Exception {
         try (ServerSocket silent = new ServerSocket(0, 50, LOOPBACK)) {   // accepts (backlog) but never sends a preamble
             ProtoClient client = track(ProtoClient.builder(new InetSocketAddress(LOOPBACK, silent.getLocalPort())).build());
-            CompletableFuture<Void> connecting = client.connectAsync();
+            CompletableFuture<ProtoClient> connecting = client.connectAsync();
             Thread.sleep(200);
             assertFalse(connecting.isDone());
             client.close();
@@ -234,7 +235,7 @@ public class ProtoClientServerTest {
     public void messagesSentWhileConnectingAreSentAfterThePreamble() throws Exception {
         try (ServerSocket raw = new ServerSocket(0, 50, LOOPBACK)) {
             ProtoClient client = track(ProtoClient.builder(new InetSocketAddress(LOOPBACK, raw.getLocalPort())).build());
-            CompletableFuture<Void> connecting = client.connectAsync();
+            CompletableFuture<ProtoClient> connecting = client.connectAsync();
             assertTrue(client.send(request(5)));   // connecting from the moment connectAsync() returns
             try (Socket peer = raw.accept()) {
                 peer.getOutputStream().write(Protocol.preamble(Protocol.VERSION, 0));
@@ -630,6 +631,73 @@ public class ProtoClientServerTest {
     // ------------------------------------------------------------------ listener builders and builders
 
     @Test
+    public void buildRejectsHandlersThatWouldBeBypassed() {
+        // A raw handler would take every message of the type
+        assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0)
+                .onMessage(HeartBeatRequest.class, (c, m) -> { })
+                .onRawMessage(HeartBeatRequest.class, (c, payload) -> { })
+                .build());
+        // Every message of the type would disconnect the peer
+        assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1)
+                .allowedMessageTypes(HeartBeatResponse.class)
+                .onMessage(HeartBeatRequest.class, (c, m) -> { })
+                .build());
+        // allowOnlyHandledTypes() contradicting other settings
+        assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).allowOnlyHandledTypes()
+                .allowedMessageTypes(HeartBeatRequest.class).onMessage(HeartBeatRequest.class, (c, m) -> { }).build());
+        assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).allowOnlyHandledTypes()
+                .onMessage(HeartBeatRequest.class, (c, m) -> { }).onOtherMessage((c, m) -> { }).build());
+        assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).allowOnlyHandledTypes().build());
+        // Consistent settings build, and the builder stays reusable
+        ProtoServer.Builder ok = ProtoServer.builder(0).allowOnlyHandledTypes().onMessage(HeartBeatRequest.class, (c, m) -> { });
+        track(ok.build());
+        track(ok.build());
+    }
+
+    @Test
+    public void allowOnlyHandledTypesDisconnectsAPeerSendingAnotherType() throws Exception {
+        BlockingQueue<Object> events = new LinkedBlockingQueue<>();
+        ProtoServer server = startServer(serverBuilder()
+                .allowOnlyHandledTypes()
+                .onMessage(HeartBeatRequest.class, (connection, request) -> events.add(request))
+                .onDisconnected((connection, reason, cause) -> events.add(reason)));
+        ProtoClient client = client(clientBuilder(server));
+        client.connect();
+        client.send(request(1));
+        client.send(HeartBeatResponse.newBuilder().setRequestTimeMillis(2).build());
+        assertEquals(request(1), events.poll(5, TimeUnit.SECONDS));
+        assertEquals(DisconnectReason.PROTOCOL_ERROR, events.poll(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    public void connectAsyncCompletesWithTheClient() throws Exception {
+        ProtoServer server = startServer(serverBuilder());
+        ProtoClient client = client(clientBuilder(server));
+        assertSame(client, client.connectAsync().get(5, TimeUnit.SECONDS));
+        assertTrue(client.isOpen());
+    }
+
+    @Test
+    public void aCallbackCanReachItsServerThroughTheConnection() throws Exception {
+        // A callback can't refer to the server variable it's being built into, so it broadcasts through server()
+        AtomicReference<ProtoServer> seen = new AtomicReference<>();
+        ProtoServer server = startServer(serverBuilder()
+                .onMessage(HeartBeatRequest.class, (connection, request) -> {
+                    seen.set(connection.server());
+                    connection.server().broadcast(HeartBeatResponse.newBuilder().setRequestTimeMillis(request.getRequestTimeMillis()).build());
+                }));
+        BlockingQueue<MessageLite> received = new LinkedBlockingQueue<>();
+        ProtoClient listener = client(clientBuilder(server).onOtherMessage((c, message) -> received.add(message)));
+        ProtoClient sender = client(clientBuilder(server));
+        listener.connect();
+        sender.connect();
+        awaitTrue(() -> server.connections().size() == 2);
+        sender.send(request(7));
+        assertEquals(7, ((HeartBeatResponse) received.poll(5, TimeUnit.SECONDS)).getRequestTimeMillis());
+        assertSame(server, seen.get());
+    }
+
+    @Test
     public void aMessageTypeCanHaveOnlyOneHandler() {
         ProtoClient.Builder client = ProtoClient.builder("localhost", 1).onMessage(HeartBeatRequest.class, (c, m) -> { });
         assertThrows(IllegalArgumentException.class, () -> client.onMessage(HeartBeatRequest.class, (c, m) -> { }));
@@ -644,7 +712,7 @@ public class ProtoClientServerTest {
         assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).connectTimeout(Duration.ofSeconds(-1)));
         assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).readBufferSize(10));
         assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).maxMessageSize(-1));
-        assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).handshakeTimeout(Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> ProtoClient.builder("localhost", 1).handshakeTimeout(Duration.ofSeconds(-1)));
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(-1));
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).backlog(0));
         assertThrows(IllegalArgumentException.class, () -> ProtoServer.builder(0).maxConnections(0));
@@ -679,7 +747,7 @@ public class ProtoClientServerTest {
     }
 
     @Test
-    public void rawHandlersReplaceOnMessageForTheirType() throws Exception {
+    public void rawHandlersReceiveTheirTypeUnparsed() throws Exception {
         BlockingQueue<Object> received = new LinkedBlockingQueue<>();
         ProtoServer server = startServer(ProtoServer.builder(new InetSocketAddress(LOOPBACK, 0))
                 .onRawMessage(HeartBeatRequest.class, (connection, payload) -> {
@@ -689,8 +757,7 @@ public class ProtoClientServerTest {
                         received.add(e);
                     }
                 })
-                        .onMessage(HeartBeatRequest.class, (connection, message) -> received.add("onMessage called"))
-                        .onOtherMessage((connection, message) -> received.add(message)));
+                .onOtherMessage((connection, message) -> received.add(message)));   // raw types never reach it
         BlockingQueue<Object> clientReceived = new LinkedBlockingQueue<>();
         ProtoClient client = track(ProtoClient.builder("localhost", server.localAddress().getPort())
                 .onRawMessage(HeartBeatResponse.class, (c, payload) -> clientReceived.add(payload.remaining()))

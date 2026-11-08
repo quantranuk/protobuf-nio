@@ -37,7 +37,7 @@ public class MultiClientsTest {
         long start = System.nanoTime();
         try {
             // Connect in batches, so that the server's accept backlog (1024 by default) doesn't overflow
-            List<CompletableFuture<Void>> batch = new ArrayList<>(CONNECT_BATCH);
+            List<CompletableFuture<ProtoClient>> batch = new ArrayList<>(CONNECT_BATCH);
             for (int i = 0; i < NO_OF_CLIENTS; i++) {
                 ProtoClient client = builder.build();
                 clients.add(client);

@@ -27,8 +27,8 @@ The first release on Maven Central, as `io.github.quantranuk:protobuf-nio-core`.
 - Connect, handshake, read, write and close timeouts, and heartbeats to keep idle connections alive.
 - Graceful close: queued messages are written before the connection closes, within `closeTimeout`.
 - `DisconnectReason`, reported exactly once per connection to `onDisconnected` and returned by `awaitClosed()`.
-- Protection against untrusted peers: an allowlist of accepted message types (`allowedMessageTypes`), checked before
-  any class is loaded; a maximum message size; memory that follows the bytes a peer actually sends; and
+- Protection against untrusted peers: accept only the types you handle (`allowOnlyHandledTypes()`) or an explicit
+  allowlist (`allowedMessageTypes`), checked before any class is loaded; a maximum message size; memory that follows the bytes a peer actually sends; and
   `maxConnections`, under which peers still in their handshake make room for new connections.
 - Low-garbage paths: raw handlers receive a message type's payload unparsed, and the writer encodes queued messages
   in batches without allocating per message.
