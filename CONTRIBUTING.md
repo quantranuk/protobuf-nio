@@ -29,6 +29,9 @@ CI (GitHub Actions) runs `./mvnw -B verify javadoc:javadoc` on every push and pu
 - `ModulePathTest` compiles a small consumer module with `javac` and runs it in a separate JVM, against the real library
   module.
 - `TlsTest` generates its certificates with the JDK's `keytool` at test time, so no keystore is committed.
+- `ReadmeExamplesTest` compiles every Java example in the README against the library, so an example that no longer
+  compiles fails the build. It names the README line. If a new example uses a message or variable the test doesn't
+  declare yet, add it to the test (or to `src/test/proto/ReadmeExamples.proto`).
 - Many tests involve timing. CI runners are small, so before sending a change, run the tests on two CPUs a few times to
   catch timing assumptions that only hold on a fast machine (on Linux):
 
